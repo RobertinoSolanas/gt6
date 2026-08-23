@@ -53,11 +53,13 @@ impl V3 {
     }
 }
 
-/// A pinhole camera looking horizontally (no pitch) at yaw `yaw`.
+/// A pinhole camera at yaw `yaw` (ground-plane heading) and `pitch`
+/// (radians, positive = looking up; 0 = horizontal).
 #[derive(Clone, Copy, Debug)]
 pub struct Cam3D {
     pub pos: V3,
     pub yaw: f64,
+    pub pitch: f64,
     /// Vertical field of view in radians.
     pub fov: f64,
     /// Viewport size in px.
@@ -67,7 +69,19 @@ pub struct Cam3D {
 
 impl Cam3D {
     pub fn new(pos: V3, yaw: f64, w: f64, h: f64) -> Self {
-        Cam3D { pos, yaw, fov: 66.0 * PI / 180.0, w, h }
+        Cam3D { pos, yaw, pitch: 0.0, fov: 66.0 * PI / 180.0, w, h }
+    }
+
+    /// Set the pitch (radians, positive = looking up).
+    pub fn with_pitch(mut self, pitch: f64) -> Self {
+        self.pitch = pitch;
+        self
+    }
+
+    /// Screen y of the horizon for this pitch (px from the top). Looking
+    /// down (negative pitch) raises it toward the top of the frame.
+    pub fn horizon(&self) -> f64 {
+        self.h / 2.0 + self.focal() * self.pitch.tan()
     }
 
     /// Focal length in px for the vertical fov.
@@ -80,7 +94,10 @@ impl Cam3D {
         let f = self.forward();
         let r = self.right();
         let d = p.sub(self.pos);
-        V3::new(d.dot(r), d.z, d.dot(f))
+        let (y0, z0) = (d.z, d.dot(f));
+        let cp = self.pitch.cos();
+        let sp = self.pitch.sin();
+        V3::new(d.dot(r), y0 * cp - z0 * sp, z0 * cp + y0 * sp)
     }
 
     /// Project a world point to screen px. `None` if behind the near plane.
@@ -99,6 +116,7 @@ impl Cam3D {
         self.focal() / depth
     }
 
+    /// Horizontal (ground-projected) forward direction.
     pub fn forward(&self) -> V3 {
         V3::new(self.yaw.cos(), self.yaw.sin(), 0.0)
     }
@@ -208,6 +226,36 @@ mod tests {
         let o1 = s1 - 400.0;
         let o2 = s2 - 400.0;
         assert!((2.0 * o2 - o1).abs() < 1e-6, "{o1} vs {o2}");
+    }
+
+    #[test]
+    fn pitch_up_moves_the_horizon_down() {
+        // Camera 10 units up, 1 km ahead on the ground ≈ horizon.
+        let flat = Cam3D::new(V3::new(0.0, 0.0, 10.0), 0.0, 800.0, 600.0);
+        let (_, sy0, _) = flat.project(V3::new(10000.0, 0.0, 0.0)).unwrap();
+        let up = flat.with_pitch(0.2);
+        let (_, sy_up, _) = up.project(V3::new(10000.0, 0.0, 0.0)).unwrap();
+        let down = flat.with_pitch(-0.2);
+        let (_, sy_down, _) = down.project(V3::new(10000.0, 0.0, 0.0)).unwrap();
+        assert!(sy_up > sy0, "looking up: horizon drops on screen");
+        assert!(sy_down < sy0, "looking down: horizon rises on screen");
+    }
+
+    #[test]
+    fn pitch_up_sees_zenith_at_center() {
+        // Camera pitched fully up (π/2) looks straight at the point above it.
+        let c = Cam3D::new(V3::new(0.0, 0.0, 0.0), 0.0, 800.0, 600.0).with_pitch(PI / 2.0);
+        let (sx, sy, _) = c.project(V3::new(0.0, 0.0, 100.0)).unwrap();
+        assert!((sx - 400.0).abs() < 1e-6);
+        assert!((sy - 300.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn horizon_matches_projection() {
+        let c = Cam3D::new(V3::new(0.0, 0.0, 50.0), 0.0, 800.0, 600.0).with_pitch(-0.3);
+        // Very far away the projection approaches the analytic horizon.
+        let (_, sy, _) = c.project(V3::new(100000.0, 0.0, 0.0)).unwrap();
+        assert!((sy - c.horizon()).abs() < 0.5, "sy={} h={}", sy, c.horizon());
     }
 
     #[test]

@@ -148,6 +148,213 @@ fn draw_box(r: &R3, corners: &[V; 8], color: u32) {
     }
 }
 
+/// Copy of a corner array with all z raised by `dz`.
+fn box_z(c: &[V; 8], dz: f64) -> [V; 8] {
+    let mut o = *c;
+    for v in o.iter_mut() {
+        v.z += dz;
+    }
+    o
+}
+
+/// Window texture on the 4 walls: individual windows when close enough to
+/// resolve, horizontal floor-bands at mid range, nothing when far.
+fn draw_windows(r: &R3, c: &[V; 8], ht: f64) {
+    for f in 0..4 {
+        let a0 = c[f];
+        let a1 = c[(f + 1) % 4];
+        let t0 = c[f + 4];
+        let u = a1.sub(a0);
+        let up0 = t0.sub(a0);
+        let l = u.len();
+        if l < 16.0 || ht < 26.0 {
+            continue;
+        }
+        // Cull walls that are not reasonably facing the camera: windows on
+        // edge-on walls project as slivers. Also skip walls right up close
+        // to the camera, where clipping produces stray quads.
+        let n = u.cross(up0);
+        let mid0 = V::new((a0.x + a1.x) / 2.0, (a0.y + a1.y) / 2.0, ht / 2.0);
+        let vdir = mid0.sub(r.cam.pos).normalized();
+        if n.normalized().dot(vdir) < 0.30 {
+            continue;
+        }
+        if r.cam.pos.sub(mid0).len() < 30.0 {
+            continue;
+        }
+        // Face center, only used for a scale estimate.
+        let Some((_, _, depth)) = r.cam.project(mid0) else { continue };
+        let s = r.cam.scale_at(depth);
+        if s < 0.30 {
+            continue; // too far away: keep the flat box
+        }
+        let up = t0.sub(a0); // wall "up" vector
+        // t = fraction along the wall, z = absolute height (0..ht).
+        let pt = |t: f64, z: f64| {
+            let zf = z / ht;
+            V::new(
+                a0.x + u.x * t + up.x * zf,
+                a0.y + u.y * t + up.y * zf,
+                a0.z + u.z * t + up.z * zf,
+            )
+        };
+        // Draw a window quad unless its projection is degenerate
+        // (blown-up extent = sliver) or behind the near plane.
+        let quad = |r: &R3, q: [V; 4], col: &str| {
+            let (w, h) = (r.cam.w, r.cam.h);
+            let mut xs = [0.0f64; 4];
+            let mut ys = [0.0f64; 4];
+            for (i, v) in q.iter().enumerate() {
+                let Some((sx, sy, _)) = r.cam.project(*v) else { return };
+                xs[i] = sx;
+                ys[i] = sy;
+            }
+            let ext_x = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - xs.iter().cloned().fold(f64::INFINITY, f64::min);
+            let ext_y = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - ys.iter().cloned().fold(f64::INFINITY, f64::min);
+            if ext_x > 2.0 * w || ext_y > 2.0 * h {
+                return; // degenerate sliver
+            }
+            r.fill_poly(&q, col);
+        };
+        let cols = ((l - 12.0) / 12.0).floor() as i32;
+        let rows = ((ht - 12.0) / 12.0).floor() as i32;
+        if cols < 1 || rows < 1 {
+            continue;
+        }
+        if cols * rows > 56 {
+            // Floor bands.
+            for iy in 0..rows {
+                let z0 = 6.0 + iy as f64 * 12.0;
+                let z1 = z0 + 7.0;
+                quad(r, [pt(0.04, z0), pt(0.96, z0), pt(0.96, z1), pt(0.04, z1)], "#26313d");
+            }
+        } else {
+            let seed = (a0.x * 131.7 + a0.y * 97.3 + f as f64 * 7.0) as i64;
+            for iy in 0..rows {
+                for ix in 0..cols {
+                    let t0 = (6.0 + ix as f64 * 12.0) / l;
+                    let t1 = (6.0 + ix as f64 * 12.0 + 7.0) / l;
+                    let z0 = 6.0 + iy as f64 * 12.0;
+                    let z1 = z0 + 7.0;
+                    let hsh = ((seed + ix as i64 * 17 + iy as i64 * 101).wrapping_mul(2654435761)) as u32;
+                    let col = match hsh % 9 {
+                        0 => "#e6d9a8", // the occasional lit window
+                        _ => match hsh % 4 {
+                            0 => "#1c2530",
+                            1 => "#232e3b",
+                            2 => "#2a3846",
+                            _ => "#1f2b38",
+                        },
+                    };
+                    quad(r, [pt(t0, z0), pt(t1, z0), pt(t1, z1), pt(t0, z1)], col);
+                }
+            }
+        }
+    }
+}
+
+/// Building: shaded box + windows + parapet outline + rooftop AC unit.
+fn draw_building(r: &R3, x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32) {
+    // Camera inside (or close around) this box: skip it entirely —
+    // near-plane-clipped walls would smear fullscreen slivers across the view.
+    let cp = r.cam.pos;
+    if cp.x > x - 24.0 && cp.x < x + w + 24.0 && cp.y > y - 24.0 && cp.y < y + h + 24.0 && cp.z <= ht + 2.0 {
+        return;
+    }
+    let corners = box_ax(x, y, w, h, ht);
+    draw_box(r, &corners, color);
+    draw_windows(r, &corners, ht);
+    // Parapet outline + rooftop AC unit: only when the roof itself is
+    // visible from above. When the camera is lower than the roof, these
+    // roofline edges project as long streaks across the sky (the wall
+    // behind them is edge-on and culled).
+    if cp.z > ht {
+        let edge = shade(color, 0.78);
+        for i in 0..4 {
+            r.line3d(corners[i + 4], corners[(i + 1) % 4 + 4], 2.5, &edge);
+        }
+        let hh = ((x * 131.7 + y * 97.3) as i64).unsigned_abs() as u32;
+        if hh % 2 == 0 && w > 26.0 && h > 26.0 {
+            let ac = box_ax(x + w * 0.60, y + h * 0.25, 12.0, 9.0, 5.0);
+            draw_box(r, &box_z(&ac, ht - 1.0), 0x78828d);
+        }
+    }
+}
+
+/// Detailed car: wheels + rims, raised body, glass cabin, roof, head/tail
+/// lights; police add a dark stripe and a flashing light bar.
+fn draw_car(
+    r: &R3,
+    x: f64,
+    y: f64,
+    heading: f64,
+    len: f64,
+    wid: f64,
+    ht: f64,
+    color: u32,
+    police: bool,
+    time: f64,
+) {
+    let (fx, fy) = (heading.cos(), heading.sin());
+    let (rx, ry) = (-fy, fx);
+    shadow(r, x, y, len * 0.55, wid * 0.75);
+
+    // Wheels + rim rings (rims protrude slightly from the outer face).
+    let lx = len / 2.0 - (len * 0.22).max(8.0);
+    let ly = wid / 2.0 - 1.0;
+    for sx in [-1.0, 1.0] {
+        for sy in [-1.0, 1.0] {
+            let wx = x + fx * lx * sx + rx * ly * sy;
+            let wy = y + fy * lx * sx + ry * ly * sy;
+            draw_box(r, &box_rot(wx, wy, heading, 8.5, 3.6, 8.0), 0x15171b);
+            let rw = wx + rx * sy * 1.1;
+            let rw2 = wy + ry * sy * 1.1;
+            draw_box(r, &box_z(&box_rot(rw, rw2, heading, 6.5, 3.2, 6.2), 0.9), 0x99a1ac);
+        }
+    }
+    // Body, sitting on the wheels.
+    draw_box(r, &box_z(&box_rot(x, y, heading, len, wid, ht), 4.0), color);
+    if police {
+        draw_box(
+            r,
+            &box_z(&box_rot(x, y, heading, len * 0.97, wid + 1.0, 3.4), 6.5),
+            0x1e232b,
+        );
+    }
+    // Glass cabin + body-colored roof slab.
+    let (cx, cy) = (x - fx * len * 0.07, y - fy * len * 0.07);
+    let cl = len * 0.55;
+    let cz = 4.0 + ht;
+    draw_box(r, &box_z(&box_rot(cx, cy, heading, cl, wid * 0.88, 8.5), cz), 0x151f2b);
+    draw_box(
+        r,
+        &box_z(&box_rot(cx, cy, heading, cl * 0.99, wid * 0.90, 2.0), cz + 6.5),
+        color,
+    );
+    // Headlights (front) and taillights (rear).
+    for sy in [-1.0, 1.0] {
+        let lxh = len / 2.0 + 0.6;
+        let (hx, hy) = (
+            x + fx * lxh + rx * wid * 0.30 * sy,
+            y + fy * lxh + ry * wid * 0.30 * sy,
+        );
+        draw_box(r, &box_z(&box_rot(hx, hy, heading, 1.4, 4.5, 4.0), 5.5), 0xfff3c4);
+        let (tx, ty) = (
+            x - fx * lxh + rx * wid * 0.30 * sy,
+            y - fy * lxh + ry * wid * 0.30 * sy,
+        );
+        draw_box(r, &box_z(&box_rot(tx, ty, heading, 1.4, 4.5, 3.5), 5.5), 0xd84330);
+    }
+    if police {
+        let on = ((time * 8.0).floor() as u32) % 2 == 0;
+        let c = if on { 0xff3b30 } else { 0x3478f6 };
+        let bar = box_z(&box_rot(x, y, heading, 10.0, 5.0, 4.0), cz + 8.5);
+        draw_box(r, &bar, c);
+    }
+}
+
 /// Soft ground shadow (ellipse) under something at (x, y).
 fn shadow(r: &R3, x: f64, y: f64, rx: f64, ry: f64) {
     if let Some((sx, sy, z)) = r.cam.project(V::new(x, y, 0.3)) {
@@ -211,21 +418,28 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         (140.0 + 140.0 * t, 85.0 + 70.0 * t)
     };
     let (fx, fy) = (s.cam3d_yaw.cos(), s.cam3d_yaw.sin());
-    let cam = Cam3D::new(V::new(px - fx * dist, py - fy * dist, height), s.cam3d_yaw, w, h);
+    let cam = Cam3D::new(
+        V::new(px - fx * dist, py - fy * dist, height),
+        s.cam3d_yaw,
+        w,
+        h,
+    )
+    .with_pitch(s.cam3d_pitch);
     let r = R3 { ctx, cam };
 
-    // ---- Sky (camera has no pitch, so the horizon is mid-screen) ----
+    // ---- Sky (horizon shifts with the user's pitch) ----
+    let horizon = cam.horizon().clamp(0.0, h);
     #[allow(deprecated)] // web-sys has no non-deprecated gradient overload
     {
-        let g = ctx.create_linear_gradient(0.0, 0.0, 0.0, h);
+        let g = ctx.create_linear_gradient(0.0, 0.0, 0.0, h.max(1.0));
         let _ = g.add_color_stop(0.0, "#79b6ec");
-        let _ = g.add_color_stop(0.5, "#cfe7fb");
+        let _ = g.add_color_stop((horizon / h).clamp(0.05, 1.0) as f32, "#cfe7fb");
         ctx.set_fill_style(&JsValue::from(g));
         ctx.fill_rect(0.0, 0.0, w, h);
     }
     // Ground plane (extends past the city).
     ctx.set_fill_style_str("#41704b");
-    ctx.fill_rect(0.0, h / 2.0 - 1.0, w, h / 2.0 + 2.0);
+    ctx.fill_rect(0.0, horizon - 1.0, w, (h - horizon + 2.0).max(0.0));
 
     // ---- Roads ----
     ctx.set_fill_style_str("#3b3f46");
@@ -244,7 +458,25 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         r.fill_poly(&v, "#3b3f46");
     }
 
-    // ---- Blocks: sidewalk slabs & parks (flat) ----
+    let cpos = cam.pos;
+
+    // Dashed yellow center lines on the roads (culled by distance).
+    let dash_range2 = 1600.0 * 1600.0;
+    for i in 0..=N {
+        let c = i as f64 * CELL + ROAD / 2.0;
+        let mut d = 6.0;
+        while d < SIZE - 24.0 {
+            if dist2(cpos, c, d + 7.0, 0.0) < dash_range2 {
+                r.fill_poly(&[V::new(c - 1.5, d, 0.05), V::new(c + 1.5, d, 0.05), V::new(c + 1.5, d + 14.0, 0.05), V::new(c - 1.5, d + 14.0, 0.05)], "#c9a227");
+            }
+            if dist2(cpos, d + 7.0, c, 0.0) < dash_range2 {
+                r.fill_poly(&[V::new(d, c - 1.5, 0.05), V::new(d + 14.0, c - 1.5, 0.05), V::new(d + 14.0, c + 1.5, 0.05), V::new(d, c + 1.5, 0.05)], "#c9a227");
+            }
+            d += 40.0;
+        }
+    }
+
+    // ---- Blocks: sidewalk slabs & parks, with darker curb edges ----
     for j in 0..N {
         for i in 0..N {
             let bx = i as f64 * CELL + ROAD;
@@ -259,12 +491,21 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
                 crate::city::BlockKind::Buildings => r.fill_poly(&v, "#8f9aa3"),
                 crate::city::BlockKind::Park => r.fill_poly(&v, "#3e8e52"),
             }
+            // Curb line just inside each edge of the slab.
+            let curb = if b.kind == crate::city::BlockKind::Park {
+                "#357a45"
+            } else {
+                "#78828b"
+            };
+            r.fill_poly(&[V::new(bx, by, 0.05), V::new(bx + BLOCK, by, 0.05), V::new(bx + BLOCK, by + 3.0, 0.05), V::new(bx, by + 3.0, 0.05)], curb);
+            r.fill_poly(&[V::new(bx, by + BLOCK, 0.05), V::new(bx + BLOCK, by + BLOCK, 0.05), V::new(bx + BLOCK, by + BLOCK - 3.0, 0.05), V::new(bx, by + BLOCK - 3.0, 0.05)], curb);
+            r.fill_poly(&[V::new(bx, by, 0.05), V::new(bx + 3.0, by, 0.05), V::new(bx + 3.0, by + BLOCK, 0.05), V::new(bx, by + BLOCK, 0.05)], curb);
+            r.fill_poly(&[V::new(bx + BLOCK, by, 0.05), V::new(bx + BLOCK - 3.0, by, 0.05), V::new(bx + BLOCK - 3.0, by + BLOCK, 0.05), V::new(bx + BLOCK, by + BLOCK, 0.05)], curb);
         }
     }
 
     // ---- Collect 3D objects, sort far → near (painter's algorithm) ----
     let mut items: Vec<Item> = Vec::with_capacity(200);
-    let cpos = cam.pos;
     let push = |items: &mut Vec<Item>, d2: f64, kind: Kind| {
         if d2 < DRAW_RANGE2 {
             items.push(Item { d2, kind });
@@ -347,28 +588,20 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     for it in &items {
         match &it.kind {
             Kind::Building { x, y, w, h, ht, color } => {
-                draw_box(&r, &box_ax(*x, *y, *w, *h, *ht), *color);
+                draw_building(&r, *x, *y, *w, *h, *ht, *color);
             }
             Kind::Car { x, y, heading, len, wid, ht, color, police } => {
-                shadow(&r, *x, *y, *len * 0.55, *wid * 0.7);
-                draw_box(&r, &box_rot(*x, *y, *heading, *len, *wid, *ht), *color);
-                if *police {
-                    // Flashing light bar on the roof.
-                    let on = ((s.time * 8.0).floor() as u32) % 2 == 0;
-                    let c = if on { 0xff3b30 } else { 0x3478f6 };
-                    let bar = box_rot(*x, *y, *heading, 10.0, 5.0, 4.0)
-                        .map(|v| V::new(v.x, v.y, v.z + *ht));
-                    draw_box(&r, &bar, c);
-                }
+                draw_car(&r, *x, *y, *heading, *len, *wid, *ht, *color, *police, s.time);
             }
             Kind::Ped { x, y, color, dead } => {
                 if *dead {
                     ctx.set_global_alpha(0.55);
                 }
                 shadow(&r, *x, *y, 8.0, 8.0);
-                draw_box(&r, &box_rot(*x, *y, 0.0, 9.0, 9.0, 24.0), *color);
-                // Head.
-                if let Some((sx, sy, z)) = cam.project(V::new(*x, *y, 29.0)) {
+                // Legs, torso, head.
+                draw_box(&r, &box_rot(*x, *y, 0.0, 8.0, 8.0, 11.0), 0x2b303c);
+                draw_box(&r, &box_z(&box_rot(*x, *y, 0.0, 9.5, 9.5, 13.0), 10.0), *color);
+                if let Some((sx, sy, z)) = cam.project(V::new(*x, *y, 27.5)) {
                     let rad = (4.5 * cam.scale_at(z)).max(1.0);
                     ctx.set_fill_style_str("#e0ac69");
                     ctx.begin_path();
@@ -381,18 +614,17 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
                 let tr = *rad;
                 shadow(&r, *x, *y, tr * 1.2, tr * 1.2);
                 r.line3d(V::new(*x, *y, 0.0), V::new(*x, *y, 16.0), 5.0, "#5b4632");
-                if let Some((sx, sy, z)) = cam.project(V::new(*x, *y, 18.0)) {
-                    let s = cam.scale_at(z);
-                    let rx = (tr * 1.7 * s).max(1.0);
-                    let ry = rx * 0.75;
-                    ctx.set_fill_style_str("#2d6a3f");
-                    ctx.begin_path();
-                    ctx.ellipse(sx, sy + 2.0 * s, rx, ry, 0.0, 0.0, std::f64::consts::TAU);
-                    ctx.fill();
-                    ctx.set_fill_style_str("#4caf6d");
-                    ctx.begin_path();
-                    ctx.ellipse(sx, sy, rx, ry, 0.0, 0.0, std::f64::consts::TAU);
-                    ctx.fill();
+                // Three stacked canopy blobs, darker at the base.
+                for (z, k, col) in [(15.0, 1.8, "#24522f"), (19.0, 1.45, "#2d6a3f"), (22.0, 1.05, "#4caf6d")] {
+                    if let Some((sx, sy, zc)) = cam.project(V::new(*x, *y, z)) {
+                        let sc = cam.scale_at(zc);
+                        let rxx = (tr * k * sc).max(1.0);
+                        let ryy = rxx * 0.75;
+                        ctx.set_fill_style_str(col);
+                        ctx.begin_path();
+                        ctx.ellipse(sx, sy, rxx, ryy, 0.0, 0.0, std::f64::consts::TAU);
+                        ctx.fill();
+                    }
                 }
             }
             Kind::Marker { x, y, green, pulse } => {
@@ -439,7 +671,7 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     ctx.set_font("bold 14px 'Segoe UI', system-ui, sans-serif");
     ctx.set_text_align("left");
     ctx.set_fill_style_str("rgba(0,0,0,0.45)");
-    ctx.fill_rect(12.0, h - 108.0, 132.0, 26.0);
+    ctx.fill_rect(12.0, h - 108.0, 380.0, 26.0);
     ctx.set_fill_style_str("#9be7ff");
-    ctx.fill_text("3D — V: TOP-DOWN", 20.0, h - 90.0);
+    ctx.fill_text("3D — DRAG: LOOK · C: RESET · V: TOP-DOWN", 20.0, h - 90.0);
 }

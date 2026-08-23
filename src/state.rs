@@ -54,6 +54,12 @@ pub struct GameState {
     /// Smoothed chase-cam yaw for 3D mode (lags behind the player heading so
     /// turns feel fluid).
     pub cam3d_yaw: f64,
+    /// User camera orbit offset (mouse-drag in 3D mode), added to the chase
+    /// cam yaw so the player can look around.
+    pub cam3d_orbit: f64,
+    /// User camera pitch (mouse vertical-drag in 3D mode); radians, positive
+    /// = looking up.
+    pub cam3d_pitch: f64,
 }
 
 /// Events that need DOM/audio side effects (emitted by update).
@@ -108,6 +114,8 @@ impl GameState {
             cam_y: car.y,
             view_3d: false,
             cam3d_yaw: car.heading,
+            cam3d_orbit: 0.0,
+            cam3d_pitch: 0.0,
         };
         s.set_msg("DELIVER PACKAGES. DON'T GET CAUGHT.", 8.0);
         s
@@ -147,13 +155,24 @@ impl GameState {
         }
         self.time += DT;
 
-        // ---- View mode & 3D chase-cam yaw (smooth, shortest path) ----
+        // ---- View mode & 3D chase-cam (smooth, shortest path) ----
         if input.just_pressed("v") {
             self.view_3d = !self.view_3d;
         }
-        let tyaw = if self.on_foot { self.foot_heading } else { self.car.heading };
+        // Mouse-drag camera control (3D mode): horizontal drag orbits around
+        // the player, vertical drag tilts the pitch; C resets to chase view.
+        let (mdx, mdy) = input.mouse_delta();
+        if self.view_3d {
+            self.cam3d_orbit += mdx * 0.005;
+            self.cam3d_pitch = (self.cam3d_pitch - mdy * 0.004).clamp(-1.2, 0.6);
+        }
+        if input.just_pressed("c") {
+            self.cam3d_orbit = 0.0;
+            self.cam3d_pitch = 0.0;
+        }
+        let heading = if self.on_foot { self.foot_heading } else { self.car.heading };
         let kk = (1.0 - (-7.0 * DT).exp()).clamp(0.0, 1.0);
-        self.cam3d_yaw = crate::cam3d::lerp_angle(self.cam3d_yaw, tyaw, kk);
+        self.cam3d_yaw = crate::cam3d::lerp_angle(self.cam3d_yaw, heading + self.cam3d_orbit, kk);
 
         // Busted screen: world keeps running, player can't act.
         if self.time < self.busted_until {
@@ -498,6 +517,40 @@ mod tests {
             s.cam3d_yaw,
             std::f64::consts::FRAC_PI_4
         );
+    }
+
+    #[test]
+    fn mouse_drag_orbits_and_pitches_the_3d_camera() {
+        let mut s = GameState::new(42);
+        let mut inp = Input::new();
+        inp.key_down("v"); // enter 3D mode
+        s.tick(&mut inp);
+        assert!(s.view_3d);
+        // Drag right + down: orbit positive, pitch goes negative (look down).
+        inp.mouse_down();
+        inp.mouse_move(200.0, 100.0);
+        s.tick(&mut inp);
+        inp.mouse_up();
+        assert!(s.cam3d_orbit > 0.5, "orbit={}", s.cam3d_orbit);
+        assert!(s.cam3d_pitch < 0.0, "pitch={}", s.cam3d_pitch);
+        // Dragging in top-down mode does nothing.
+        inp.key_up("v");
+        inp.key_down("v");
+        s.tick(&mut inp);
+        let (o, p) = (s.cam3d_orbit, s.cam3d_pitch);
+        inp.mouse_down();
+        inp.mouse_move(100.0, 100.0);
+        s.tick(&mut inp);
+        inp.mouse_up();
+        assert_eq!((s.cam3d_orbit, s.cam3d_pitch), (o, p));
+        // Back in 3D, C resets the look camera.
+        inp.key_up("v");
+        inp.key_down("v");
+        s.tick(&mut inp);
+        inp.key_down("c");
+        s.tick(&mut inp);
+        assert_eq!(s.cam3d_orbit, 0.0);
+        assert_eq!(s.cam3d_pitch, 0.0);
     }
 
     #[test]

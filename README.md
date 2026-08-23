@@ -78,6 +78,9 @@ General:
 - **P** — pause
 - **R** — recenter camera on player (top-down)
 - **V** — toggle top-down / 3D chase-cam view
+- **Mouse drag** (3D mode) — orbit the camera around the player
+  (horizontal) and tilt it up/down (vertical)
+- **C** (3D mode) — reset the camera back to the chase position
 
 ### 3D mode
 
@@ -87,6 +90,12 @@ varied height (with occasional towers), and cars, peds, trees and the
 mission marker are 3D objects with shadows. It's a software rasterizer on
 the 2D canvas — pure Rust, no WebGL. The HUD, minimap, BUSTED and PAUSED
 overlays are shared with top-down.
+
+While in 3D mode you can **drag with the mouse** to look around: horizontal
+drag orbits the camera around the player, vertical drag changes the pitch
+(the horizon moves with it). The offset is relative to the chase cam, so
+the camera keeps following the player as you drive. Press **C** to snap
+back to the default chase view.
 
 ### Gameplay
 

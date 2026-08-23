@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, KeyboardEvent};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, KeyboardEvent, MouseEvent};
 
 use crate::audio::Audio;
 use crate::input::Input;
@@ -76,6 +76,38 @@ pub fn start() {
             ri.borrow_mut().key_up(&e.key().to_string());
         });
         window.set_onkeyup(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // --- Mouse (drag to orbit/pitch the 3D camera) ---
+    {
+        let ri = input.clone();
+        let ra = audio.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
+            if e.button() == 0 {
+                e.prevent_default();
+                ra.borrow_mut().unlock();
+                ri.borrow_mut().mouse_down();
+            }
+        });
+        window.set_onmousedown(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+    {
+        let ri = input.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
+            ri.borrow_mut()
+                .mouse_move(e.movement_x() as f64, e.movement_y() as f64);
+        });
+        window.set_onmousemove(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+    {
+        let ri = input.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |_e: MouseEvent| {
+            ri.borrow_mut().mouse_up();
+        });
+        window.set_onmouseup(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
     }
 
