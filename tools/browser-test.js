@@ -150,6 +150,65 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   m = await vm();
   log('V returns to top-down', m === 0, `view_mode=${m}`);
 
+  // --- Test 12: arrow-only driving in a known open park ---
+  // Teleport to the center of the park block at (740, 1860), facing south:
+  // ~280px of collision-free ground straight ahead, room to turn.
+  if ((await info()).info[2]) { await page.keyboard.press('e'); await sleep(400); }
+  await page.evaluate(async () => (await import('./pkg/gt6.js')).debug_teleport(740, 1860, Math.PI / 2));
+  await sleep(200);
+  const wrapAngle = (a) => {
+    a = a % (2 * Math.PI);
+    if (a > Math.PI) a -= 2 * Math.PI;
+    if (a < -Math.PI) a += 2 * Math.PI;
+    return a;
+  };
+  const dirOver = async (ms) => {
+    const a = (await info()).info;
+    await sleep(ms);
+    const b = (await info()).info;
+    return Math.atan2(b[1] - a[1], b[0] - a[0]);
+  };
+
+  // ArrowUp: accelerate straight (south).
+  await page.keyboard.down('ArrowUp');
+  await sleep(300);
+  const sUp = (await info()).speed;
+  const d1 = await dirOver(250);
+  const straightErr = Math.abs(wrapAngle(d1 - Math.PI / 2));
+  log('ArrowUp drives straight', sUp > 100 && straightErr < 0.15, `speed=${sUp.toFixed(0)}, off-axis=${(straightErr * 180 / Math.PI).toFixed(0)}\u00b0`);
+
+  // Throttle-held turns (short arcs; south then east of the park are open
+  // ground, so the car never hits a building).
+  // ArrowRight curves the heading right.
+  await page.keyboard.down('ArrowRight');
+  const d2 = await dirOver(300);
+  await page.keyboard.up('ArrowRight');
+  const daR = wrapAngle(d2 - d1);
+  log('ArrowRight steers right', daR > 0.12, `dheading=${(daR * 180 / Math.PI).toFixed(0)}\u00b0`);
+
+  // ArrowLeft steers back left: after the turn, coasting straight must bring
+  // the travel direction back to the original axis (it was swung right by
+  // the ArrowRight phase).
+  await page.keyboard.down('ArrowLeft');
+  await sleep(300);
+  await page.keyboard.up('ArrowLeft');
+  const d4 = await dirOver(250);
+  const daL = wrapAngle(d4 - d2);
+  log('ArrowLeft steers back left', daL < -0.05, `dheading=${(daL * 180 / Math.PI).toFixed(0)}\u00b0`);
+
+  // ArrowDown: re-accelerate, then brake hard.
+  await page.keyboard.down('ArrowUp');
+  await sleep(800);
+  const preB = (await info()).speed;
+  await page.keyboard.down('ArrowDown');
+  await sleep(350);
+  const postB = (await info()).speed;
+  await page.keyboard.up('ArrowDown');
+  await page.keyboard.up('ArrowUp');
+  log('ArrowDown brakes hard', preB > 200 && postB < preB * 0.6, `${preB.toFixed(0)} -> ${postB.toFixed(0)} px/s`);
+  await sleep(800); // roll to a stop
+  await page.screenshot({ path: '/tmp/gt6test/arrows.png' });
+
   await page.screenshot({ path: '/tmp/gt6test/after-drive.png' });
   await sleep(800);
   await page.screenshot({ path: '/tmp/gt6test/final.png' });

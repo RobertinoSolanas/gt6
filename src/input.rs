@@ -91,6 +91,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn arrow_keys_map_to_car_controls() {
+        let mut inp = Input::new();
+        // Up = throttle.
+        inp.key_down("arrowup");
+        let ci = inp.car_controls();
+        assert_eq!(ci.throttle, 1.0);
+        assert_eq!(ci.steer, 0.0);
+        inp.key_up("arrowup");
+        // Down = brake/reverse.
+        inp.key_down("arrowdown");
+        let ci = inp.car_controls();
+        assert_eq!(ci.throttle, -1.0);
+        inp.key_up("arrowdown");
+        // Left = steer left.
+        inp.key_down("arrowleft");
+        let ci = inp.car_controls();
+        assert_eq!(ci.steer, -1.0);
+        assert_eq!(ci.throttle, 0.0);
+        inp.key_up("arrowleft");
+        // Right = steer right.
+        inp.key_down("arrowright");
+        let ci = inp.car_controls();
+        assert_eq!(ci.steer, 1.0);
+        inp.key_up("arrowright");
+    }
+
+    #[test]
     fn press_and_release_tracking() {
         let mut inp = Input::new();
         inp.key_down("W"); // case-insensitive

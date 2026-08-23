@@ -69,6 +69,8 @@ pub const HANDBRAKE_GRIP: f64 = 1.6; // lateral friction (sliding)
 pub const HANDBRAKE_DRAG: f64 = 340.0;
 pub const STEER_RATE: f64 = 2.7; // rad/s at full steering authority
 pub const STEER_FULL_SPEED: f64 = 160.0; // speed at which steering is full
+/// Minimum steering authority at any non-zero speed (parking manoeuvres).
+pub const PARK_STEER: f64 = 0.25;
 
 /// Integrate car physics for `dt` seconds.
 pub fn step_car(c: &mut Car, inp: &CarInput, dt: f64) {
@@ -81,8 +83,10 @@ pub fn step_car(c: &mut Car, inp: &CarInput, dt: f64) {
     if inp.throttle > 0.0 {
         fwd += ACCEL * inp.throttle * if inp.boost { BOOST_ACCEL } else { 1.0 } * dt;
     } else if inp.throttle < 0.0 {
-        if fwd > 20.0 {
-            fwd -= BRAKE * dt; // braking
+        if fwd > 0.0 {
+            // Brake all the way to a full stop before building reverse,
+            // so holding S from a crawl doesn't lurch the car backwards.
+            fwd = (fwd - BRAKE * dt).max(0.0);
         } else {
             fwd += REVERSE_ACCEL * inp.throttle * dt; // reversing
         }
@@ -113,8 +117,14 @@ pub fn step_car(c: &mut Car, inp: &CarInput, dt: f64) {
     c.vx = fx * fwd - fy * lat;
     c.vy = fy * fwd + fx * lat;
 
-    // Steering authority scales with speed and flips when reversing.
-    let authority = (fwd / STEER_FULL_SPEED).clamp(-1.0, 1.0);
+    // Steering authority scales with speed and flips when reversing. A
+    // floor (PARK_STEER) keeps the car steerable at crawl speeds so you
+    // can park; a fully stopped car still can't spin its wheels.
+    let authority = if fwd.abs() < 2.0 {
+        0.0
+    } else {
+        (fwd / STEER_FULL_SPEED).clamp(-1.0, 1.0) * (1.0 - PARK_STEER) + fwd.signum() * PARK_STEER
+    };
     c.heading += inp.steer * STEER_RATE * authority * dt;
 
     c.x += c.vx * dt;
@@ -280,6 +290,67 @@ mod tests {
             with_brake.slip(),
             without_brake.slip()
         );
+    }
+
+    #[test]
+    fn full_brake_stops_a_crawl_within_two_frames() {
+        let mut c = car();
+        // Creeping forward at 12 px/s (parking speed).
+        c.vx = 12.0;
+        let brake = CarInput { throttle: -1.0, ..Default::default() };
+        step_car(&mut c, &brake, 1.0 / 60.0);
+        // A full brake must kill a 12 px/s crawl in a single frame. The old
+        // 0-20 px/s dead zone routed crawls through the slow reverse ramp
+        // (12 -> ~6 px/s) and could not.
+        assert!(
+            c.forward_speed() <= 0.0,
+            "crawl should be braked to a stop in one frame (fwd {})",
+            c.forward_speed()
+        );
+    }
+
+    #[test]
+    fn brake_from_speed_reaches_a_stop() {
+        let mut c = car();
+        let go = CarInput { throttle: 1.0, ..Default::default() };
+        for _ in 0..60 {
+            step_car(&mut c, &go, 1.0 / 60.0);
+        }
+        assert!(c.forward_speed() > 200.0, "need speed first: {}", c.forward_speed());
+        let brake = CarInput { throttle: -1.0, ..Default::default() };
+        for _ in 0..24 {
+            step_car(&mut c, &brake, 1.0 / 60.0);
+        }
+        // Full brake must take the car from highway speed down through zero
+        // (a little reverse creep is expected: S is still held).
+        assert!(
+            c.forward_speed() < 20.0,
+            "full brake should stop the car (fwd {})",
+            c.forward_speed()
+        );
+    }
+
+    #[test]
+    fn car_stays_steerable_at_crawl_speed() {
+        let mut c = car();
+        // Light throttle = a parking-like crawl (~15 px/s) with full lock.
+        let crawl = CarInput { throttle: 0.1, steer: 1.0, ..Default::default() };
+        for _ in 0..60 {
+            step_car(&mut c, &crawl, 1.0 / 60.0);
+        }
+        assert!(c.heading > 0.5, "crawl-speed steering should turn the car ({} rad)", c.heading);
+        assert!(c.speed() < 40.0, "should still be crawling: {} px/s", c.speed());
+    }
+
+    #[test]
+    fn stopped_car_cannot_spin_in_place() {
+        let mut c = car();
+        let spin = CarInput { throttle: 0.0, steer: 1.0, ..Default::default() };
+        for _ in 0..60 {
+            step_car(&mut c, &spin, 1.0 / 60.0);
+        }
+        assert_eq!(c.heading, 0.0, "a stopped car must not rotate");
+        assert_eq!(c.speed(), 0.0, "a stopped car must not move");
     }
 
     #[test]

@@ -97,6 +97,15 @@ overlays are shared with top-down.
   chase. Getting caught triggers a **BUSTED** screen and costs you money.
 - Start with $100; mission payouts add to it.
 
+### Car handling
+
+- **Parking steering**: steering has a minimum authority at any moving
+  speed, so the car can manoeuvre at crawl speeds (a fully stopped car
+  still can't spin its wheels).
+- **Firm brake**: full brake keeps brake strength down through zero —
+  no low-speed dead zone that leaks into the reverse ramp. Holding ↓ from
+  a stop then builds up a normal reverse.
+
 ## Tests
 
 ### Unit tests (native, fast)
@@ -118,8 +127,10 @@ node tools/browser-test.js
 
 Drives the game headlessly via Puppeteer (accelerates, steers, brakes,
 exits/re-enters the car and walks on foot, checks the handbrake, toggles
-the 3D view and drives in it, takes screenshots to `/tmp/gt6test/`, and
-fails on any page/console errors).
+the 3D view and drives in it, then proves pure arrow-key driving on a
+teleported open park (straight, steer right, steer back left, hard brake),
+takes screenshots to `/tmp/gt6test/`, and fails on any page/console
+errors).
 
 ## Project layout
 

@@ -553,6 +553,72 @@ mod tests {
     }
 
     #[test]
+    fn arrow_left_and_right_steer_on_a_straight_road() {
+        use crate::city::{CELL, ROAD};
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Teleport onto a long straight vertical road, facing north.
+        s.car.x = 4.0 * CELL + ROAD / 2.0;
+        s.car.y = SIZE - 200.0;
+        s.car.heading = -std::f64::consts::FRAC_PI_2;
+        s.cam_x = s.car.x;
+        s.cam_y = s.car.y;
+        // Build up speed using ArrowUp alone.
+        inp.key_down("arrowup");
+        for _ in 0..60 {
+            s.tick(&mut inp);
+        }
+        assert!(s.car.speed() > 150.0, "ArrowUp should accelerate: {} px/s", s.car.speed());
+        let h0 = s.car.heading;
+        // ArrowRight turns right (heading increases).
+        inp.key_down("arrowright");
+        for _ in 0..30 {
+            s.tick(&mut inp);
+        }
+        let h_right = s.car.heading;
+        inp.key_up("arrowright");
+        // ArrowLeft turns left (heading decreases) and steers back.
+        inp.key_down("arrowleft");
+        for _ in 0..60 {
+            s.tick(&mut inp);
+        }
+        let h_left = s.car.heading;
+        inp.key_up("arrowleft");
+        assert!(h_right > h0 + 0.1, "ArrowRight should steer right: {h0} -> {h_right}");
+        assert!(h_left < h_right - 0.1, "ArrowLeft should steer left: {h_right} -> {h_left}");
+    }
+
+    #[test]
+    fn arrow_down_brakes_a_running_car() {
+        use crate::city::{CELL, ROAD};
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Straight open lane, facing north (see the steer test above).
+        s.car.x = 4.0 * CELL + ROAD / 2.0;
+        s.car.y = SIZE - 200.0;
+        s.car.heading = -std::f64::consts::FRAC_PI_2;
+        s.cam_x = s.car.x;
+        s.cam_y = s.car.y;
+        keypress(&mut inp, "arrowup");
+        for _ in 0..90 {
+            s.tick(&mut inp);
+        }
+        let fast = s.car.speed();
+        assert!(fast > 200.0);
+        inp.key_up("arrowup");
+        keypress(&mut inp, "arrowdown");
+        for _ in 0..20 {
+            s.tick(&mut inp);
+        }
+        assert!(
+            s.car.speed() < fast * 0.5,
+            "ArrowDown should brake hard: {} -> {} px/s",
+            fast,
+            s.car.speed()
+        );
+    }
+
+    #[test]
     fn e_toggles_enter_exit_car() {
         let mut s = idle_state();
         let mut inp = Input::new();

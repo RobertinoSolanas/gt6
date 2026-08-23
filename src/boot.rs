@@ -153,6 +153,28 @@ pub fn debug_player_speed() -> f32 {
         .unwrap_or(0.0)
 }
 
+/// Debug/test: teleport the player car to `(x, y)` facing `heading`.
+/// Clears velocity and recenters the cameras; used by the browser test to
+/// reach a known straight road.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_teleport(x: f64, y: f64, heading: f64) {
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let mut s = s.borrow_mut();
+        s.on_foot = false;
+        s.car.x = x;
+        s.car.y = y;
+        s.car.heading = heading;
+        s.car.vx = 0.0;
+        s.car.vy = 0.0;
+        s.cam_x = x;
+        s.cam_y = y;
+        s.cam3d_yaw = heading;
+    }
+}
+
 /// Debug/test: `1` if the 3D view is active, `0` for top-down.
 #[wasm_bindgen]
 #[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
