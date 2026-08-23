@@ -128,7 +128,12 @@ pub fn start() {
 
         let cw = w2.inner_width().map(|v| v.as_f64().unwrap_or(800.0)).unwrap_or(800.0);
         let ch = w2.inner_height().map(|v| v.as_f64().unwrap_or(600.0)).unwrap_or(600.0);
-        crate::render::render(&ctx, &state.borrow(), cw, ch, dpr);
+        let st = state.borrow();
+        if st.view_3d {
+            crate::render3d::render(&ctx, &st, cw, ch, dpr);
+        } else {
+            crate::render::render(&ctx, &st, cw, ch, dpr);
+        }
     });
 
     *raf.borrow_mut() = Some(loop_cb);
@@ -145,6 +150,15 @@ pub static mut STATE: Option<Rc<RefCell<GameState>>> = None;
 pub fn debug_player_speed() -> f32 {
     // SAFETY: single-threaded wasm game loop.
     unsafe { STATE.as_ref().map(|s| s.borrow().player_speed() as f32) }
+        .unwrap_or(0.0)
+}
+
+/// Debug/test: `1` if the 3D view is active, `0` for top-down.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_view_mode() -> f32 {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| if s.borrow().view_3d { 1.0 } else { 0.0 }) }
         .unwrap_or(0.0)
 }
 

@@ -57,7 +57,11 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     // ---- HUD (screen space) ----
     ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
     draw_hud(ctx, s, w, h);
+    draw_overlays(ctx, s, w, h);
+}
 
+/// BUSTED screen + PAUSED overlay (shared by the 2D and 3D renderers).
+pub fn draw_overlays(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     if s.time < s.busted_until {
         draw_busted(ctx, w, h);
     }
@@ -244,7 +248,8 @@ fn draw_person(ctx: &CanvasRenderingContext2d, x: f64, y: f64, heading: f64, col
     ctx.fill();
 }
 
-fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
+/// Shared HUD (money, stars, speed, mission line, banner, minimap).
+pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     // Money (top-left).
     ctx.set_font(FONT);
     ctx.set_text_align("left");

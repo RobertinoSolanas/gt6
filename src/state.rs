@@ -48,6 +48,12 @@ pub struct GameState {
     // Camera (world coords)
     pub cam_x: f64,
     pub cam_y: f64,
+
+    // View mode (V toggles)
+    pub view_3d: bool,
+    /// Smoothed chase-cam yaw for 3D mode (lags behind the player heading so
+    /// turns feel fluid).
+    pub cam3d_yaw: f64,
 }
 
 /// Events that need DOM/audio side effects (emitted by update).
@@ -100,6 +106,8 @@ impl GameState {
             busted_until: 0.0,
             cam_x: car.x,
             cam_y: car.y,
+            view_3d: false,
+            cam3d_yaw: car.heading,
         };
         s.set_msg("DELIVER PACKAGES. DON'T GET CAUGHT.", 8.0);
         s
@@ -138,6 +146,14 @@ impl GameState {
             return events;
         }
         self.time += DT;
+
+        // ---- View mode & 3D chase-cam yaw (smooth, shortest path) ----
+        if input.just_pressed("v") {
+            self.view_3d = !self.view_3d;
+        }
+        let tyaw = if self.on_foot { self.foot_heading } else { self.car.heading };
+        let kk = (1.0 - (-7.0 * DT).exp()).clamp(0.0, 1.0);
+        self.cam3d_yaw = crate::cam3d::lerp_angle(self.cam3d_yaw, tyaw, kk);
 
         // Busted screen: world keeps running, player can't act.
         if self.time < self.busted_until {
@@ -451,6 +467,52 @@ mod tests {
 
     fn keypress(input: &mut Input, k: &str) {
         input.key_down(k);
+    }
+
+    #[test]
+    fn v_toggles_view_3d() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        assert!(!s.view_3d);
+        inp.key_down("v");
+        s.tick(&mut inp);
+        assert!(s.view_3d, "pressing V enters 3D mode");
+        inp.key_up("v");
+        inp.key_down("v");
+        s.tick(&mut inp);
+        assert!(!s.view_3d, "pressing V again returns to top-down");
+    }
+
+    #[test]
+    fn cam3d_yaw_smooths_toward_heading() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        s.car.heading = std::f64::consts::FRAC_PI_4;
+        s.cam3d_yaw = 0.0;
+        for _ in 0..120 {
+            s.tick(&mut inp);
+        }
+        assert!(
+            (s.cam3d_yaw - std::f64::consts::FRAC_PI_4).abs() < 0.01,
+            "yaw {} should settle near {}",
+            s.cam3d_yaw,
+            std::f64::consts::FRAC_PI_4
+        );
+    }
+
+    #[test]
+    fn cam3d_yaw_wraps_shortest_path_across_pi() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        s.car.heading = -std::f64::consts::FRAC_PI_4;
+        s.cam3d_yaw = std::f64::consts::PI; // opposite side of the circle
+        for _ in 0..120 {
+            s.tick(&mut inp);
+        }
+        // Shortest path from π to -π/4 passes through ±3π/4, not 0.
+        // It settles at 7π/4 (≡ -π/4 modulo 2π), which would be a long way
+        // off if the lerp had gone the long way through 0.
+        assert!((s.cam3d_yaw - 7.0 * std::f64::consts::PI / 4.0).abs() < 0.01);
     }
 
     #[test]

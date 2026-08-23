@@ -15,10 +15,10 @@ impl Input {
     }
 
     /// Keys we care about (normalized to lowercase).
-    pub const KEYS: [&str; 13] = [
+    pub const KEYS: [&str; 14] = [
         "w", "a", "s", "d",
         "arrowup", "arrowdown", "arrowleft", "arrowright",
-        " ", "shift", "e", "r", "p",
+        " ", "shift", "e", "r", "p", "v",
     ];
 
     pub fn key_down(&mut self, key: &str) {

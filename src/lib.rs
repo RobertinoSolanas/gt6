@@ -3,6 +3,7 @@
 //! Pure, unit-testable modules (city, car physics, entities, missions, state)
 //! are target-agnostic; the wasm-only modules (render, audio, boot) are gated.
 
+pub mod cam3d;
 pub mod car;
 pub mod city;
 pub mod input;
@@ -18,6 +19,8 @@ pub mod audio;
 pub mod boot;
 #[cfg(target_arch = "wasm32")]
 pub mod render;
+#[cfg(target_arch = "wasm32")]
+pub mod render3d;
 
 /// Tiny deterministic RNG (xorshift64*) so the city & tests are reproducible.
 pub struct Rng(u64);

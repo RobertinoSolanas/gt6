@@ -3,8 +3,9 @@
 A GTA-inspired top-down open-world game, **100% Rust compiled to WebAssembly**.
 Procedurally generated city, drivable cars and on-foot mode, pedestrians, AI
 traffic, a police/wanted system, and a timed package-delivery mission loop —
-rendered on a `<canvas>`, with sound via the Web Audio API. No native code,
-no C, no SDL.
+rendered on a `<canvas>`, with sound via the Web Audio API. Two view modes:
+classic **top-down** and a **3D chase-cam** mode (press `V`). No native
+code, no C, no SDL.
 
 ## Architecture
 
@@ -19,9 +20,14 @@ The crate (`src/`) is split into two halves:
   - `mission.rs` — timed fetch-and-deliver missions (yellow = pickup, green = delivery)
   - `state.rs` — game state machine, HUD, score
   - `input.rs` — keyboard input mapping
+  - `cam3d.rs` — 3D camera & perspective projection math (chase cam,
+    near-plane clipping, angle lerp)
 - **wasm-only glue** (`#[cfg(target_arch = "wasm32")]`):
   - `boot.rs` — WASM entry point, wires up the game loop + canvas
-  - `render.rs` — canvas rendering
+  - `render.rs` — top-down canvas rendering (+ shared HUD/overlays)
+  - `render3d.rs` — 3D mode: software perspective renderer (extruded
+    building boxes, sun-shaded faces, painter's-algorithm depth sorting,
+    near-plane clipping) drawn on the same canvas
   - `audio.rs` — Web Audio oscillator bleeps
 
 A small deterministic RNG (`xorshift64*`, in `lib.rs`) makes the generated
@@ -70,7 +76,17 @@ On foot:
 General:
 
 - **P** — pause
-- **R** — recenter camera on player
+- **R** — recenter camera on player (top-down)
+- **V** — toggle top-down / 3D chase-cam view
+
+### 3D mode
+
+`V` switches to a third-person perspective view: the camera chases the
+player (pulling in/out with speed), the city is extruded into buildings of
+varied height (with occasional towers), and cars, peds, trees and the
+mission marker are 3D objects with shadows. It's a software rasterizer on
+the 2D canvas — pure Rust, no WebGL. The HUD, minimap, BUSTED and PAUSED
+overlays are shared with top-down.
 
 ### Gameplay
 
@@ -101,8 +117,9 @@ node tools/browser-test.js
 ```
 
 Drives the game headlessly via Puppeteer (accelerates, steers, brakes,
-exits/re-enters the car and walks on foot, checks the handbrake, takes
-screenshots to `/tmp/gt6test/`, and fails on any page/console errors).
+exits/re-enters the car and walks on foot, checks the handbrake, toggles
+the 3D view and drives in it, takes screenshots to `/tmp/gt6test/`, and
+fails on any page/console errors).
 
 ## Project layout
 

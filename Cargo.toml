@@ -24,6 +24,7 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
+    "CanvasGradient",
     "KeyboardEvent",
     "Event",
     "AudioContext",

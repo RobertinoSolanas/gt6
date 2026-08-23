@@ -132,6 +132,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.keyboard.up(' ');
   log('handbrake brakes hard', s < pre * 0.4, `speed ${pre.toFixed(0)} -> ${s.toFixed(0)} after 0.4s handbrake`);
 
+  // --- Test 11: V toggles the 3D view (and 3D frames render cleanly) ---
+  const vm = () =>
+    page.evaluate(async () => (await import('./pkg/gt6.js')).debug_view_mode());
+  await page.keyboard.press('v');
+  await sleep(1500); // let several 3D frames render while coasting
+  let m = await vm();
+  log('V enters 3D mode', m === 1, `view_mode=${m}`);
+  await page.keyboard.down('w');
+  await sleep(1200); // drive in 3D (chase cam should follow)
+  await page.keyboard.up('w');
+  m = await vm();
+  log('3D view survives driving', m === 1 && (await info()).speed > 0, `view_mode=${m}`);
+  await page.screenshot({ path: '/tmp/gt6test/3d-mode.png' });
+  await page.keyboard.press('v');
+  await sleep(500);
+  m = await vm();
+  log('V returns to top-down', m === 0, `view_mode=${m}`);
+
   await page.screenshot({ path: '/tmp/gt6test/after-drive.png' });
   await sleep(800);
   await page.screenshot({ path: '/tmp/gt6test/final.png' });

@@ -33,6 +33,8 @@ pub struct Building {
     pub w: f64,
     pub h: f64,
     pub color: u32, // 0xRRGGBB
+    /// 3D height above the street (0 in 2D mode, used by the 3D renderer).
+    pub height: f64,
 }
 
 impl Building {
@@ -104,7 +106,13 @@ impl City {
                         let w = lot_w - 4.0 - inset;
                         let h = lot_w - 4.0 - inset;
                         let color = BUILDING_PALETTE[rng.below(BUILDING_PALETTE.len())];
-                        buildings[lot] = Some(Building { x, y, w, h, color });
+                        // Mostly mid-rise, occasionally a tower.
+                        let height = if rng.f() < 0.16 {
+                            rng.range(240.0, 420.0)
+                        } else {
+                            rng.range(45.0, 220.0)
+                        };
+                        buildings[lot] = Some(Building { x, y, w, h, color, height });
                     }
                     Block {
                         kind: BlockKind::Buildings,
