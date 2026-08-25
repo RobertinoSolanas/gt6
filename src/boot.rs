@@ -79,15 +79,31 @@ pub fn start() {
         cb.forget();
     }
 
-    // --- Mouse (drag to orbit/pitch the 3D camera) ---
+    // --- Mouse (drag to orbit/pitch the 3D camera, or steer the plane) ---
+    // No context menu: the right button is a game control.
+    {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            e.prevent_default();
+        });
+        let _ = window.add_event_listener_with_callback("contextmenu", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
     {
         let ri = input.clone();
         let ra = audio.clone();
         let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
-            if e.button() == 0 {
-                e.prevent_default();
-                ra.borrow_mut().unlock();
-                ri.borrow_mut().mouse_down();
+            match e.button() {
+                0 => {
+                    e.prevent_default();
+                    ra.borrow_mut().unlock();
+                    ri.borrow_mut().mouse_down();
+                }
+                2 => {
+                    e.prevent_default();
+                    ra.borrow_mut().unlock();
+                    ri.borrow_mut().mouse_right_down();
+                }
+                _ => {}
             }
         });
         window.set_onmousedown(Some(cb.as_ref().unchecked_ref()));
@@ -104,10 +120,26 @@ pub fn start() {
     }
     {
         let ri = input.clone();
-        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |_e: MouseEvent| {
-            ri.borrow_mut().mouse_up();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
+            match e.button() {
+                0 => ri.borrow_mut().mouse_up(),
+                2 => ri.borrow_mut().mouse_right_up(),
+                _ => {}
+            }
         });
         window.set_onmouseup(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // --- Mouse wheel (cruise throttle in the plane) ---
+    {
+        let ri = input.clone();
+        let cb = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |e: web_sys::WheelEvent| {
+            // Normalize: one notch = 1, regardless of wheel granularity.
+            // Wheel up = more throttle, wheel down = less.
+            ri.borrow_mut().mouse_wheel(-e.delta_y().signum());
+        });
+        window.set_onwheel(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
     }
 
@@ -196,6 +228,7 @@ pub fn debug_teleport(x: f64, y: f64, heading: f64) {
     if let Some(s) = state {
         let mut s = s.borrow_mut();
         s.on_foot = false;
+        s.in_plane = false;
         s.car.x = x;
         s.car.y = y;
         s.car.heading = heading;
@@ -207,6 +240,48 @@ pub fn debug_teleport(x: f64, y: f64, heading: f64) {
     }
 }
 
+/// Debug/test: player altitude (the plane's `z`, 0 on foot / in the car).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_player_alt() -> f32 {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| s.borrow().player_alt() as f32) }
+        .unwrap_or(0.0)
+}
+
+/// Debug/test: the plane's mouse cruise throttle (0..1).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_mouse_throttle() -> f32 {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| s.borrow().mouse_throttle as f32) }
+        .unwrap_or(0.0)
+}
+
+/// Debug/test: clear wanted heat, dismiss the police, and end any BUSTED
+/// screen (used by the browser tests to keep the streets quiet).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_clear_heat() {
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let mut s = s.borrow_mut();
+        s.heat = 0.0;
+        s.police.clear();
+        s.busted_until = 0.0;
+    }
+}
+
+/// Debug/test: `1` while the M auto-land autopilot is active.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_landing() -> f32 {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| if s.borrow().landing { 1.0 } else { 0.0 }) }
+        .unwrap_or(0.0)
+}
+
 /// Debug/test: `1` if the 3D view is active, `0` for top-down.
 #[wasm_bindgen]
 #[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
@@ -214,6 +289,32 @@ pub fn debug_view_mode() -> f32 {
     // SAFETY: single-threaded wasm game loop.
     unsafe { STATE.as_ref().map(|s| if s.borrow().view_3d { 1.0 } else { 0.0 }) }
         .unwrap_or(0.0)
+}
+
+/// Debug/test: wildlife snapshot as a flat f64 array:
+/// `[n_el, (x, y, scale) x n_el, n_birds, (x, y, z) x n_birds]`.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_wildlife() -> Array {
+    let a = Array::new();
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let s = s.borrow();
+        a.push(&wasm_bindgen::JsValue::from_f64(s.wildlife.elephants.len() as f64));
+        for e in &s.wildlife.elephants {
+            a.push(&wasm_bindgen::JsValue::from_f64(e.x));
+            a.push(&wasm_bindgen::JsValue::from_f64(e.y));
+            a.push(&wasm_bindgen::JsValue::from_f64(e.scale));
+        }
+        a.push(&wasm_bindgen::JsValue::from_f64(s.wildlife.birds.len() as f64));
+        for b in &s.wildlife.birds {
+            a.push(&wasm_bindgen::JsValue::from_f64(b.x));
+            a.push(&wasm_bindgen::JsValue::from_f64(b.y));
+            a.push(&wasm_bindgen::JsValue::from_f64(b.z));
+        }
+    }
+    a
 }
 
 /// Debug/test: `[player_x, player_y, on_foot, money, stars]`.

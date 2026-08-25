@@ -24,7 +24,11 @@ pub struct Ped {
     pub color: u32,
 }
 
-const SHIRT: [u32; 6] = [0xe9c46a, 0x2a9d8f, 0xe76f51, 0x8ecae6, 0xf28482, 0xb5838d];
+/// Bright shirt palette so the sidewalk crowd pops against the grey slabs.
+const SHIRT: [u32; 10] = [
+    0xf4d35e, 0x2a9d8f, 0xe76f51, 0x4ea8de, 0xf28482,
+    0x9b5de5, 0x06d6a0, 0xef476f, 0xffd166, 0x118ab2,
+];
 
 /// Center point of the sidewalk line for block side `side` (0=N, 1=E, 2=S, 3=W).
 pub fn side_point(i: usize, j: usize, side: u8, t: f64) -> (f64, f64) {
@@ -94,7 +98,7 @@ impl Ped {
         if !fleeing && d < 6.0 {
             self.pick_target(rng);
         } else {
-            self.heading = angle_to(self.heading, self.tx.atan2(self.ty));
+            self.heading = angle_to(self.heading, dy.atan2(dx));
         }
 
         let spd = if fleeing { 150.0 } else { self.speed };

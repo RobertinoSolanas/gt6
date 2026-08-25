@@ -109,6 +109,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   log('E re-enters car', f[2] === false, `on_foot=${f[2]}`);
 
   // --- Test 9: arrow keys also drive ---
+  // The driving above earns wanted heat; with a working police pursuit a
+  // BUSTED screen would freeze the car, so clear it before precision tests.
+  await page.evaluate(async () => (await import('./pkg/gt6.js')).debug_clear_heat());
+  await sleep(200);
   await page.keyboard.down('ArrowUp');
   await sleep(1200);
   s = (await info()).speed;
@@ -133,6 +137,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   log('handbrake brakes hard', s < pre * 0.4, `speed ${pre.toFixed(0)} -> ${s.toFixed(0)} after 0.4s handbrake`);
 
   // --- Test 11: V toggles the 3D view (and 3D frames render cleanly) ---
+  await page.evaluate(async () => (await import('./pkg/gt6.js')).debug_clear_heat());
   const vm = () =>
     page.evaluate(async () => (await import('./pkg/gt6.js')).debug_view_mode());
   await page.keyboard.press('v');

@@ -65,9 +65,11 @@ pub struct City {
     pub blocks: Vec<Block>, // index j * N + i
 }
 
-const BUILDING_PALETTE: [u32; 8] = [
-    0x8d99ae, 0xb5838d, 0x6d6875, 0x9a8c98,
-    0x84a98c, 0xc9ada7, 0x5f7470, 0xa68a64,
+/// Vibrant, sun-washed building colors (sands, terracotta, powder blue,
+/// sage, salmon, wisteria, mustard, slate, cream, rosewood).
+const BUILDING_PALETTE: [u32; 10] = [
+    0xd7b899, 0xc77b52, 0x8ea9c8, 0x7ba58e, 0xdf9a86,
+    0xc9a6cf, 0xd9c27e, 0x8b93a7, 0xe0d3b2, 0xa3696c,
 ];
 
 impl City {
@@ -155,6 +157,14 @@ impl City {
     /// Intersection centers are at (i * CELL + ROAD/2, j * CELL + ROAD/2).
     pub fn intersection_pos(i: usize, j: usize) -> (f64, f64) {
         (i as f64 * CELL + ROAD / 2.0, j as f64 * CELL + ROAD / 2.0)
+    }
+
+    /// The nearest road intersection to `(x, y)` — always a clear open space,
+    /// used as the auto-landing spot.
+    pub fn nearest_intersection(x: f64, y: f64) -> (f64, f64) {
+        let i = ((x - ROAD / 2.0) / CELL).round().clamp(0.0, N as f64) as usize;
+        let j = ((y - ROAD / 2.0) / CELL).round().clamp(0.0, N as f64) as usize;
+        Self::intersection_pos(i, j)
     }
 
     /// All buildings in the city.
@@ -317,6 +327,28 @@ mod tests {
         // With a fixed seed we expect a healthy mix, and enough buildings.
         assert!(building_blocks >= N * N / 2);
         assert!(city.buildings().count() > 50);
+    }
+
+    #[test]
+    fn nearest_intersection_is_a_close_road() {
+        // From anywhere in the city, the nearest intersection is on a road
+        // and within half a cell.
+        let city = City::new(42);
+        let mut x = 0.0;
+        while x <= SIZE {
+            let mut y = 0.0;
+            while y <= SIZE {
+                let (tx, ty) = City::nearest_intersection(x, y);
+                assert!(city.is_road(tx, ty), "({},{}) should be a road", tx, ty);
+                let d = ((tx - x).powi(2) + (ty - y).powi(2)).sqrt();
+                assert!(d <= CELL * std::f64::consts::FRAC_1_SQRT_2 + 1.0, "too far: {}", d);
+                y += 131.0;
+            }
+            x += 97.0;
+        }
+        // Exact intersection centers map to themselves.
+        let (ix, iy) = City::intersection_pos(3, 4);
+        assert_eq!(City::nearest_intersection(ix, iy), (ix, iy));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub enum CarKind {
     Player,
     Traffic,
     Police,
+    Plane,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -16,6 +17,10 @@ pub struct Car {
     pub heading: f64,
     pub vx: f64,
     pub vy: f64,
+    /// Vertical velocity (px/s, aircraft only).
+    pub vz: f64,
+    /// Altitude above the streets (aircraft only; 0 for ground vehicles).
+    pub z: f64,
     pub kind: CarKind,
     pub color: u32, // 0xRRGGBB
     pub radius: f64,
@@ -27,8 +32,9 @@ impl Car {
             CarKind::Player => (0xd62828, 24.0),
             CarKind::Traffic => (0x457b9d, 18.0),
             CarKind::Police => (0xf1f1f1, 19.0),
+            CarKind::Plane => (0xeef1f5, 30.0),
         };
-        Car { x, y, heading, vx: 0.0, vy: 0.0, kind, color, radius }
+        Car { x, y, heading, vx: 0.0, vy: 0.0, vz: 0.0, z: 0.0, kind, color, radius }
     }
 
     pub fn speed(&self) -> f64 {
@@ -52,6 +58,8 @@ pub struct CarInput {
     pub throttle: f64,
     /// -1..=1 (negative = left)
     pub steer: f64,
+    /// Vertical stick (aircraft only): +1 = climb, -1 = descend.
+    pub pitch: f64,
     pub handbrake: bool,
     pub boost: bool,
 }
@@ -71,6 +79,19 @@ pub const STEER_RATE: f64 = 2.7; // rad/s at full steering authority
 pub const STEER_FULL_SPEED: f64 = 160.0; // speed at which steering is full
 /// Minimum steering authority at any non-zero speed (parking manoeuvres).
 pub const PARK_STEER: f64 = 0.25;
+
+// --- Aircraft tuning (px/s, px/s^2, rad/s) ---
+pub const PLANE_ACCEL: f64 = 420.0;
+pub const PLANE_BRAKE: f64 = 640.0;
+pub const PLANE_REVERSE_ACCEL: f64 = 170.0;
+pub const PLANE_MAX_SPEED: f64 = 950.0;
+pub const PLANE_MAX_REVERSE: f64 = 150.0;
+pub const PLANE_DRAG: f64 = 0.35;
+pub const PLANE_YAW_RATE: f64 = 1.7;
+/// Vertical speed (px/s) at full stick.
+pub const PLANE_VSPEED: f64 = 280.0;
+pub const PLANE_MIN_Z: f64 = 0.0;
+pub const PLANE_MAX_Z: f64 = 1200.0;
 
 /// Integrate car physics for `dt` seconds.
 pub fn step_car(c: &mut Car, inp: &CarInput, dt: f64) {
@@ -131,6 +152,57 @@ pub fn step_car(c: &mut Car, inp: &CarInput, dt: f64) {
     c.y += c.vy * dt;
 }
 
+/// Integrate arcade aircraft physics for `dt` seconds. The plane always
+/// flies (no stall): `throttle` drives forward speed, `steer` yaws the nose,
+/// and `pitch` (+1 = climb) sets the vertical speed. There is no building
+/// collision — at altitude the plane simply flies over the city.
+pub fn step_plane(c: &mut Car, inp: &CarInput, dt: f64) {
+    let (fx, fy) = (c.heading.cos(), c.heading.sin());
+    let mut fwd = c.vx * fx + c.vy * fy;
+
+    if inp.throttle > 0.0 {
+        fwd += PLANE_ACCEL * inp.throttle * dt;
+    } else if inp.throttle < 0.0 {
+        if fwd > 0.0 {
+            // Brake all the way to a stop before building reverse.
+            fwd = (fwd - PLANE_BRAKE * -inp.throttle * dt).max(0.0);
+        } else {
+            fwd += PLANE_REVERSE_ACCEL * inp.throttle * dt;
+        }
+    }
+    fwd = fwd.clamp(-PLANE_MAX_REVERSE, PLANE_MAX_SPEED);
+    fwd *= 1.0 / (1.0 + PLANE_DRAG * dt);
+
+    // Yaw: some rudder authority even on the ground, full in flight.
+    let authority = 0.2 + 0.8 * (fwd / 240.0).clamp(-1.0, 1.0);
+    c.heading += inp.steer * PLANE_YAW_RATE * authority * dt;
+
+    // Vertical: vz eases toward the pitch-stick target (smooth takeoff/climb).
+    let target_vz = inp.pitch.clamp(-1.0, 1.0) * PLANE_VSPEED;
+    let k = (1.0 - (-3.0 * dt).exp()).clamp(0.0, 1.0);
+    c.vz += (target_vz - c.vz) * k;
+    c.z += c.vz * dt;
+    if c.z < PLANE_MIN_Z {
+        c.z = PLANE_MIN_Z;
+        c.vz = c.vz.max(0.0);
+    }
+    if c.z > PLANE_MAX_Z {
+        c.z = PLANE_MAX_Z;
+        c.vz = c.vz.min(0.0);
+    }
+
+    let (fx, fy) = (c.heading.cos(), c.heading.sin());
+    c.vx = fx * fwd;
+    c.vy = fy * fwd;
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+
+    // Keep the player from getting lost over the void.
+    let m = crate::city::SIZE + 500.0;
+    c.x = c.x.clamp(-500.0, m);
+    c.y = c.y.clamp(-500.0, m);
+}
+
 /// Resolve a car's circle against the city, with a small bounce.
 /// Returns true if a collision happened.
 pub fn collide_car_with_city(c: &mut Car, city: &crate::city::City) -> bool {
@@ -156,7 +228,7 @@ pub fn drive_to(c: &mut Car, tx: f64, ty: f64, max_speed: f64, turn_rate: f64, d
     let dx = tx - c.x;
     let dy = ty - c.y;
     let dist = (dx * dx + dy * dy).sqrt();
-    let target = dx.atan2(dy);
+    let target = dy.atan2(dx);
 
     // Angle difference wrapped to [-pi, pi].
     let mut diff = target - c.heading;
@@ -172,7 +244,7 @@ pub fn drive_to(c: &mut Car, tx: f64, ty: f64, max_speed: f64, turn_rate: f64, d
     let arrive = (dist / 90.0).min(1.0);
     let throttle = if dist > 12.0 { arrive } else { 0.0 };
 
-    let inp = CarInput { throttle, steer: steer.min(1.0), handbrake: false, boost: false };
+    let inp = CarInput { throttle, steer: steer.min(1.0), handbrake: false, boost: false, pitch: 0.0 };
     // Temporarily clamp speed: run normal physics, then soft-clamp speed.
     step_car(c, &inp, dt);
     let cap = max_speed * (turn_rate / 2.2).clamp(0.4, 1.1);
@@ -196,6 +268,8 @@ mod tests {
             heading: 0.0,
             vx: 0.0,
             vy: 0.0,
+            vz: 0.0,
+            z: 0.0,
             kind: CarKind::Player,
             color: 0,
             radius: 24.0,
@@ -361,6 +435,65 @@ mod tests {
             step_car(&mut c, &inp, 1.0 / 60.0);
         }
         assert!(c.speed() <= MAX_SPEED * 1.28 + 1.0);
+    }
+
+    #[test]
+    fn plane_climbs_with_pitch_and_gains_speed() {
+        let mut c = Car::new(400.0, 400.0, 0.0, CarKind::Plane);
+        let inp = CarInput { throttle: 1.0, pitch: 1.0, ..Default::default() };
+        for _ in 0..180 {
+            step_plane(&mut c, &inp, 1.0 / 60.0);
+        }
+        assert!(c.speed() > 300.0, "plane should reach speed: {}", c.speed());
+        assert!(c.z > 200.0, "full-stick pitch should climb: z={}", c.z);
+    }
+
+    #[test]
+    fn plane_holds_altitude_without_pitch_and_descends() {
+        let mut c = Car::new(400.0, 400.0, 0.0, CarKind::Plane);
+        c.z = 300.0;
+        let inp = CarInput { throttle: 1.0, pitch: 0.0, ..Default::default() };
+        for _ in 0..120 {
+            step_plane(&mut c, &inp, 1.0 / 60.0);
+        }
+        assert!((c.z - 300.0).abs() < 1.0, "no pitch should hold altitude: z={}", c.z);
+        let down = CarInput { throttle: 1.0, pitch: -1.0, ..Default::default() };
+        for _ in 0..120 {
+            step_plane(&mut c, &down, 1.0 / 60.0);
+        }
+        assert!(c.z < 150.0, "full-stick down should descend: z={}", c.z);
+        assert!(c.z >= PLANE_MIN_Z, "never below the ground");
+    }
+
+    #[test]
+    fn plane_yaws_and_respects_max_speed() {
+        let mut c = Car::new(400.0, 400.0, 0.0, CarKind::Plane);
+        let inp = CarInput { throttle: 1.0, steer: 1.0, ..Default::default() };
+        for _ in 0..600 {
+            step_plane(&mut c, &inp, 1.0 / 60.0);
+        }
+        assert!(c.speed() <= PLANE_MAX_SPEED + 1.0);
+        assert!(c.heading > 1.0, "full-stick rudder should turn the nose: {}", c.heading);
+    }
+
+    #[test]
+    fn plane_flys_over_buildings_without_collision() {
+        use crate::city::City;
+        let city = City::new(1);
+        let mut c = Car::new(40.0, 140.0, 0.0, CarKind::Plane);
+        c.z = 60.0; // low altitude: below lots of rooftops
+        let inp = CarInput { throttle: 1.0, ..Default::default() };
+        let mut over_a_building = false;
+        for _ in 0..60 * 20 {
+            step_plane(&mut c, &inp, 1.0 / 60.0);
+            if city.buildings().any(|b| b.contains(c.x, c.y)) {
+                over_a_building = true;
+            }
+        }
+        assert!(over_a_building, "the flight path should pass over buildings");
+        // At altitude the plane is never deflected off its straight heading.
+        assert!(c.heading.abs() < 0.01, "heading should stay straight: {}", c.heading);
+        assert!(c.x > 3000.0, "plane should have flown across the city");
     }
 
     #[test]

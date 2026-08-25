@@ -1,17 +1,20 @@
 //! GTA VI — Web Edition. A top-down open-world game in pure Rust (WASM).
 //!
-//! Pure, unit-testable modules (city, car physics, entities, missions, state)
-//! are target-agnostic; the wasm-only modules (render, audio, boot) are gated.
+//! Pure, unit-testable modules (city, car physics, entities, missions, state,
+//! fx particles) are target-agnostic; the wasm-only modules
+//! (render, audio, boot) are gated.
 
 pub mod cam3d;
 pub mod car;
 pub mod city;
+pub mod fx;
 pub mod input;
 pub mod mission;
 pub mod ped;
 pub mod police;
 pub mod state;
 pub mod traffic;
+pub mod wildlife;
 
 #[cfg(target_arch = "wasm32")]
 pub mod audio;

@@ -7,8 +7,11 @@ use std::collections::HashSet;
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Mouse {
     pub down: bool,
+    pub right: bool,
     pub dx: f64,
     pub dy: f64,
+    /// Accumulated wheel notches since the last frame (1 = one notch).
+    pub wheel: f64,
 }
 
 #[derive(Default)]
@@ -24,10 +27,10 @@ impl Input {
     }
 
     /// Keys we care about (normalized to lowercase).
-    pub const KEYS: [&str; 15] = [
+    pub const KEYS: [&str; 18] = [
         "w", "a", "s", "d",
         "arrowup", "arrowdown", "arrowleft", "arrowright",
-        " ", "shift", "e", "r", "p", "v", "c",
+        " ", "shift", "e", "r", "p", "v", "c", "f", "m", "z",
     ];
 
     pub fn key_down(&mut self, key: &str) {
@@ -55,6 +58,7 @@ impl Input {
         self.just_pressed.clear();
         self.mouse.dx = 0.0;
         self.mouse.dy = 0.0;
+        self.mouse.wheel = 0.0;
     }
 
     /// Primary mouse button pressed.
@@ -67,9 +71,34 @@ impl Input {
         self.mouse.down = false;
     }
 
-    /// Mouse moved by `(dx, dy)` px; only counts while the button is down.
+    /// Right mouse button pressed.
+    pub fn mouse_right_down(&mut self) {
+        self.mouse.right = true;
+    }
+
+    /// Right mouse button released.
+    pub fn mouse_right_up(&mut self) {
+        self.mouse.right = false;
+    }
+
+    /// Is the right mouse button currently down?
+    pub fn mouse_right_state(&self) -> bool {
+        self.mouse.right
+    }
+
+    /// Mouse wheel turned. `notches` is already normalized (1 = one notch).
+    pub fn mouse_wheel(&mut self, notches: f64) {
+        self.mouse.wheel += notches;
+    }
+
+    /// Accumulated wheel notches since the last `end_frame`.
+    pub fn wheel_delta(&self) -> f64 {
+        self.mouse.wheel
+    }
+
+    /// Mouse moved by `(dx, dy)` px; only counts while a button is down.
     pub fn mouse_move(&mut self, dx: f64, dy: f64) {
-        if self.mouse.down {
+        if self.mouse.down || self.mouse.right {
             self.mouse.dx += dx;
             self.mouse.dy += dy;
         }
@@ -102,6 +131,14 @@ impl Input {
         }
         ci.handbrake = self.is_down(" ");
         ci.boost = self.is_down("shift");
+        // Aircraft pitch stick: Shift = climb, Space = descend (cars ignore it).
+        ci.pitch = if self.is_down("shift") {
+            1.0
+        } else if self.is_down(" ") {
+            -1.0
+        } else {
+            0.0
+        };
         ci
     }
 
@@ -197,6 +234,27 @@ mod tests {
         let ci2 = inp2.car_controls();
         assert_eq!(ci2.throttle, 1.0);
         assert_eq!(ci2.steer, -1.0);
+    }
+
+    #[test]
+    fn right_button_and_wheel_are_tracked() {
+        let mut inp = Input::new();
+        inp.mouse_right_down();
+        assert!(inp.mouse_right_state());
+        // Dragging counts while the right button is down too.
+        inp.mouse_move(5.0, 3.0);
+        assert_eq!(inp.mouse_delta(), (5.0, 3.0));
+        inp.end_frame();
+        inp.mouse_right_up();
+        assert!(!inp.mouse_right_state());
+        inp.mouse_move(5.0, 3.0); // no button down -> ignored
+        assert_eq!(inp.mouse_delta(), (0.0, 0.0));
+        inp.mouse_wheel(1.0);
+        inp.mouse_wheel(-1.0);
+        inp.mouse_wheel(1.0);
+        assert_eq!(inp.wheel_delta(), 1.0);
+        inp.end_frame();
+        assert_eq!(inp.wheel_delta(), 0.0);
     }
 
     #[test]
