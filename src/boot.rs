@@ -151,6 +151,13 @@ pub fn start() {
         .dyn_into::<CanvasRenderingContext2d>()
         .unwrap();
 
+    // --- Dragon GLB model (async fetch + parse + bake) ---
+    // The game renders a low-poly silhouette until this completes.
+    {
+        let st = state.clone();
+        load_dragon_glb(&window, st);
+    }
+
     // --- Main loop (rAF) ---
     let raf: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
     let raf2 = raf.clone();
@@ -282,6 +289,36 @@ pub fn debug_landing() -> f32 {
         .unwrap_or(0.0)
 }
 
+/// Debug/test: switch to the 3D view and aim the camera at the dragon
+/// (used by the browser test to photograph the GLB model).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_dragon_focus() {
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let mut s = s.borrow_mut();
+        let (px, py) = s.player_pos();
+        let (dx, dy, dz) = (s.wildlife.dragon.x, s.wildlife.dragon.y, s.wildlife.dragon.z);
+        let dist = (dx - px).hypot(dy - py).max(1.0);
+        // The camera keeps easing back to `player heading + cam3d_orbit`, so
+        // park the orbit offset where the dragon sits.
+        let heading = if s.on_foot {
+            s.foot_heading
+        } else {
+            s.active_vehicle().heading
+        };
+        let mut diff = ((dy - py).atan2(dx - px) - heading).rem_euclid(std::f64::consts::TAU);
+        if diff > std::f64::consts::PI {
+            diff -= std::f64::consts::TAU;
+        }
+        s.view_3d = true;
+        s.cam3d_orbit = diff;
+        s.cam3d_yaw = heading + diff;
+        s.cam3d_pitch = ((dz - 60.0) / dist).clamp(-0.4, 0.6);
+    }
+}
+
 /// Debug/test: `1` if the 3D view is active, `0` for top-down.
 #[wasm_bindgen]
 #[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
@@ -289,6 +326,107 @@ pub fn debug_view_mode() -> f32 {
     // SAFETY: single-threaded wasm game loop.
     unsafe { STATE.as_ref().map(|s| if s.borrow().view_3d { 1.0 } else { 0.0 }) }
         .unwrap_or(0.0)
+}
+
+/// Debug/test: dragon snapshot as a flat f64 array:
+/// `[x, y, z, heading, flap, bank, tris]` (`tris` is the triangle count of
+/// the loaded GLB mesh — 0 while it is still loading or if the fetch failed).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_dragon() -> Array {
+    let a = Array::new();
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let s = s.borrow();
+        let d = s.wildlife.dragon;
+        a.push(&wasm_bindgen::JsValue::from_f64(d.x));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.y));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.z));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.heading));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.flap));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.bank));
+        a.push(&wasm_bindgen::JsValue::from_f64(
+            s.dragon_mesh.as_ref().map(|m| m.tri_count() as f64).unwrap_or(0.0),
+        ));
+        a.push(&wasm_bindgen::JsValue::from_f64(if s.in_dragon { 1.0 } else { 0.0 }));
+        a.push(&wasm_bindgen::JsValue::from_f64(d.speed));
+    }
+    a
+}
+
+/// The dragon GLB: local asset (downloaded from the internet once, checked
+/// in so the game also works offline) and its original home on the internet
+/// (KhronosGroup glTF sample models, CC-BY 4.0) as the fallback.
+const DRAGON_GLB_LOCAL: &str = "assets/dragon.glb";
+const DRAGON_GLB_REMOTE: &str = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Models/master/2.0/DragonAttenuation/glTF-Binary/DragonAttenuation.glb";
+
+/// Small console helpers (the `console` web-sys API takes JsValues).
+fn log_err(msg: &str) {
+    web_sys::console::error_1(&JsValue::from_str(msg));
+}
+
+fn log_info(msg: &str) {
+    web_sys::console::log_1(&JsValue::from_str(msg));
+}
+
+/// Fetch the dragon GLB, parse it with the `gltf` crate, bake the mesh into
+/// the game state. Local asset first; on failure it falls back to loading
+/// the free model straight from the internet.
+fn load_dragon_glb(window: &web_sys::Window, state: Rc<RefCell<GameState>>) {
+    try_fetch_dragon(window.clone(), state, DRAGON_GLB_LOCAL, true);
+}
+
+/// Wrap an at-most-once JS callback into the `FnMut` closure the promise
+/// APIs want (promise `then`/`catch` callbacks fire at most once).
+fn call_once(f: impl FnOnce(JsValue) + 'static) -> Closure<dyn FnMut(JsValue)> {
+    let once: RefCell<Option<Box<dyn FnOnce(JsValue)>>> = RefCell::new(Some(Box::new(f)));
+    Closure::new(move |v: JsValue| {
+        if let Some(cb) = once.take() {
+            cb(v);
+        }
+    })
+}
+
+fn try_fetch_dragon(window: web_sys::Window, state: Rc<RefCell<GameState>>, url: &'static str, from_local: bool) {
+    let promise = window.fetch_with_str(url);
+    let st = state.clone();
+    let on_response = call_once(move |resp: JsValue| {
+        let resp: Result<web_sys::Response, JsValue> = resp.dyn_into();
+        let buf_promise = match resp.and_then(|r| r.array_buffer()) {
+            Ok(p) => p,
+            Err(_) => {
+                log_err("dragon.glb: not a valid response body");
+                return;
+            }
+        };
+        let on_buffer = Closure::<dyn FnMut(JsValue)>::new(move |buf: JsValue| {
+            let ab: js_sys::ArrayBuffer = buf.unchecked_into();
+            let bytes: Vec<u8> = js_sys::Uint8Array::new(&ab).to_vec();
+            match crate::glb::load_glb(&bytes) {
+                Ok(model) => match crate::wildlife::DragonMesh::from_gltf(&model) {
+                    Some(mesh) => {
+                        log_info(&format!("dragon.glb loaded: {} tris", mesh.tri_count()));
+                        st.borrow_mut().dragon_mesh = Some(mesh);
+                    }
+                    None => log_err("dragon.glb: no dragon mesh found"),
+                },
+                Err(e) => log_err(&format!("dragon.glb parse failed: {e}")),
+            }
+        });
+        let _ = buf_promise.then(&on_buffer);
+        on_buffer.forget();
+    });
+    let on_reject = call_once(move |_e: JsValue| {
+        if from_local {
+            log_err("local dragon.glb failed, trying the internet copy");
+            try_fetch_dragon(window, state, DRAGON_GLB_REMOTE, false);
+        }
+    });
+    let _ = promise.then(&on_response);
+    let _ = promise.catch(&on_reject);
+    on_response.forget();
+    on_reject.forget();
 }
 
 /// Debug/test: wildlife snapshot as a flat f64 array:

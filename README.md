@@ -6,7 +6,8 @@ traffic, a police/wanted system, live wildlife (a herd of elephants that
 wanders the streets and birds flapping and gliding through the sky), and a
 timed package-delivery mission loop — rendered on a `<canvas>`, with sound
 via the Web Audio API. There's a car and an **airplane** (fly over the whole
-city). Two view modes:
+city), and a **dragon** you can take to the sky (press `D` and fly it with
+the keyboard and mouse). Two view modes:
 classic **top-down** and a **3D chase-cam** mode (press `V`). No native
 code, no C, no SDL.
 
@@ -22,7 +23,14 @@ The crate (`src/`) is split into two halves:
   - `police.rs` — police / wanted-level logic
   - `mission.rs` — timed fetch-and-deliver missions (yellow = pickup, green = delivery)
   - `wildlife.rs` — elephants (herd wander, startle-and-freeze, diagonal
-    walk gait) and birds (flap/glide flight, meandering sky paths)
+    walk gait), birds (flap/glide flight, meandering sky paths) and the
+    dragon (high-altitude banked meanders, plus a player-controlled flight
+    mode, owns a private RNG stream so it never disturbs the deterministic
+    world), plus the baked `DragonMesh` (a GLB model converted to plain
+    render-ready arrays)
+  - `glb.rs` — minimal binary-glTF (GLB) loader built on the Khronos
+    `gltf` crate: parses geometry, applies node transforms, decodes
+    embedded JPEG/PNG textures and bakes base colors into vertices
   - `state.rs` — game state machine, HUD, score
   - `fx.rs` — particle system (tire smoke, crash sparks, debris, dust,
     mission glitter) — pure data + update, drawn by both renderers
@@ -101,6 +109,20 @@ In the airplane (keyboard and mouse both work; keyboard wins when held):
   again any time to cancel and take back the controls.
 - **E** — exit (must be slow; drops you to the street below)
 
+Riding the dragon (keyboard and mouse both work; keyboard wins when held):
+
+- **D** — take the dragon's reins / release it. Because `D` is already a
+  movement key (steer, walk), it only summons the dragon where it is free:
+  from a (nearly) stopped car, from an elephant you're riding, or while
+  already on the dragon (to get off). Riding it snaps you into the 3D view.
+- **W / ↑** — speed up (throttle) · **S / ↓** — slow down / brake
+- **A / D, ← / →, or mouse drag** — turn (the dragon banks into its turns)
+- **Shift** — climb · **Space** — dive
+- **Left mouse (hold)** — full throttle · **Right mouse (hold)** — full brake
+- **Mouse wheel** — set cruise throttle (shown as THR % in the HUD)
+- **D** — release: you drop to the street below, on foot, and the dragon
+  resumes circling the city on its own from the altitude you left it at.
+
 On foot:
 
 - **WASD / arrows** — walk
@@ -158,6 +180,26 @@ Press **V** for the 3D chase cam: the camera follows you up and the city
 spreads out beneath you. To land by hand, dive back down, cut the throttle
 and press **E** once you're nearly stopped — or just press **M** and the
 autopilot lands the plane on the nearest clear intersection for you.
+
+### The dragon — a real 3D model (GLB)
+
+A bronze dragon circles the city at high altitude. It isn't hand-modeled:
+it's a genuine GLB (binary glTF) asset — Khronos' *DragonAttenuation*
+sample model (~6.5 MB, 91,216 dragon triangles, embedded JPEG textures) —
+downloaded to `web/assets/dragon.glb`. At boot the game fetches it (local
+file first, with a raw-GitHub-URL fallback), parses it with the `gltf`
+crate, and bakes it into a flat `DragonMesh` (positions, normals, wing-flap
+weights and per-triangle colors, all pre-scaled and re-oriented). The 3D
+renderer then transforms and depth-sorts the whole mesh every frame behind
+the buildings, with the same backface culling, sun lighting and distance
+fog as everything else; far away it falls back to a cheap silhouette so the
+software rasterizer never drowns in distant triangles. In the top-down view
+it's a small flapping shadow-caster. Press **D** to take its reins and fly
+it yourself (W/S speed, A/D or drag to turn, Shift/Space to climb and dive)
+— a smooth, banked, wing-flapping pursuit over the rooftops — then press **D**
+again to drop back to the street and let it resume its rounds. Its flight
+loop runs on a private RNG so the rest of the deterministic world is
+unaffected.
 
 ### Visual FX & particles
 
@@ -224,14 +266,26 @@ flies it with the mouse (climb, yaw, wheel throttle), screenshots the 3D
 flyover (`/tmp/gt6_plane_fly.png`), then auto-lands with **M** at the nearest
 safe space.
 
+`node tools/dragon-test.js` checks the GLB pipeline: the dragon model loads
+with its triangle count, the dragon is actually flying, and a focused 3D
+screenshot lands in `/tmp/gt6_dragon_3d.png`.
+
+`node tools/dragon-fly-test.js` exercises the dragon-control mode: mounts it
+with **D**, climbs and accelerates with the keyboard, banks a turn with a
+mouse drag, screenshots the 3D chase cam (`/tmp/gt6_dragon_fly.png`), then
+releases it back to the street.
+
 ## Project layout
 
 ```
 Cargo.toml            crate config (rlib for tests + cdylib for wasm)
 src/                  game code (see Architecture)
 web/index.html        one-page host
+web/assets/dragon.glb the dragon 3D model (GLB, Khronos sample)
 web/pkg/              wasm-bindgen output (generated, do not edit)
 tools/browser-test.js headless-browser smoke test
+tools/dragon-test.js  headless GLB/dragon smoke test
+tools/dragon-fly-test.js  headless dragon-control smoke test
 ```
 
 ## License

@@ -8,6 +8,7 @@ pub mod cam3d;
 pub mod car;
 pub mod city;
 pub mod fx;
+pub mod glb;
 pub mod input;
 pub mod mission;
 pub mod ped;
@@ -26,6 +27,7 @@ pub mod render;
 pub mod render3d;
 
 /// Tiny deterministic RNG (xorshift64*) so the city & tests are reproducible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rng(u64);
 
 impl Rng {

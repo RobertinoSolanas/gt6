@@ -30,6 +30,10 @@ pub struct GameState {
     /// is currently the pilot of it.
     pub plane: Car,
     pub in_plane: bool,
+    /// The dragon. `in_dragon` = the player is riding the dragon and
+    /// piloting it ("D" to toggle): the player's position/altitude become
+    /// the dragon's and the ground is left behind.
+    pub in_dragon: bool,
     pub on_foot: bool,
     pub foot_x: f64,
     pub foot_y: f64,
@@ -44,6 +48,10 @@ pub struct GameState {
     pub traffic: Vec<TrafficCar>,
     pub police: Vec<Car>,
     pub wildlife: Wildlife,
+    /// The dragon's GLB mesh, baked and loaded at runtime (see `boot.rs`
+    /// and `glb.rs`). `None` until the async load completes (or on load
+    /// failure — the renderers then fall back to a low-poly silhouette).
+    pub dragon_mesh: Option<crate::wildlife::DragonMesh>,
     /// Particle effects (tire smoke, sparks, dust, glitter). Pure data;
     /// the renderers draw it.
     pub fx: Fx,
@@ -125,6 +133,7 @@ impl GameState {
             car,
             plane,
             in_plane: false,
+            in_dragon: false,
             on_foot: false,
             foot_x: sx,
             foot_y: sy,
@@ -134,6 +143,7 @@ impl GameState {
             traffic,
             police: Vec::new(),
             wildlife,
+            dragon_mesh: None,
             fx: Fx::new(),
             heat: 0.0,
             last_crime: -100.0,
@@ -174,14 +184,23 @@ impl GameState {
         }
     }
 
-    /// Player altitude above the streets (plane only; 0 otherwise).
+    /// Player altitude above the streets (dragon or plane; 0 otherwise).
     pub fn player_alt(&self) -> f64 {
-        if self.in_plane { self.plane.z } else { 0.0 }
+        if self.in_dragon {
+            self.wildlife.dragon.z
+        } else if self.in_plane {
+            self.plane.z
+        } else {
+            0.0
+        }
     }
 
-    /// Player position (car, plane, foot, or the elephant being ridden).
+    /// Player position (dragon, car, plane, foot, or the elephant ridden).
     pub fn player_pos(&self) -> (f64, f64) {
-        if self.on_foot || self.riding.is_some() {
+        if self.in_dragon {
+            let d = &self.wildlife.dragon;
+            (d.x, d.y)
+        } else if self.on_foot || self.riding.is_some() {
             (self.foot_x, self.foot_y)
         } else {
             let v = self.active_vehicle();
@@ -189,9 +208,11 @@ impl GameState {
         }
     }
 
-    /// Player speed (px/s) — used for run-overs and bust checks.
+    /// Player speed (px/s) — used for run-overs, bust checks and the HUD.
     pub fn player_speed(&self) -> f64 {
-        if let Some(idx) = self.riding {
+        if self.in_dragon {
+            self.wildlife.dragon.speed
+        } else if let Some(idx) = self.riding {
             let e = &self.wildlife.elephants[idx];
             e.speed * e.gait // the elephant's current ground speed
         } else if self.on_foot {
@@ -218,9 +239,9 @@ impl GameState {
         }
         // Mouse-drag camera control (3D mode): horizontal drag orbits around
         // the player, vertical drag tilts the pitch; C resets to chase view.
-        // In the plane the drag steers the plane instead (see below).
+        // In the plane (or on the dragon) the drag steers the craft instead.
         let (mdx, mdy) = input.mouse_delta();
-        if self.view_3d && !self.in_plane {
+        if self.view_3d && !self.in_plane && !self.in_dragon {
             self.cam3d_orbit += mdx * 0.005;
             self.cam3d_pitch = (self.cam3d_pitch - mdy * 0.004).clamp(-1.2, 0.6);
         }
@@ -228,12 +249,13 @@ impl GameState {
             self.cam3d_orbit = 0.0;
             self.cam3d_pitch = 0.0;
         }
-        let heading =
-            if self.on_foot || self.riding.is_some() {
-                self.foot_heading
-            } else {
-                self.car.heading
-            };
+        let heading = if self.in_dragon {
+            self.wildlife.dragon.heading
+        } else if self.on_foot || self.riding.is_some() {
+            self.foot_heading
+        } else {
+            self.car.heading
+        };
         let kk = (1.0 - (-7.0 * DT).exp()).clamp(0.0, 1.0);
         self.cam3d_yaw = crate::cam3d::lerp_angle(self.cam3d_yaw, heading + self.cam3d_orbit, kk);
 
@@ -265,6 +287,51 @@ impl GameState {
             self.on_foot = false;
             self.riding = None; // summons the plane off the elephant's back
             self.set_msg("PLANE SUMMONED — DRAG: steer · LMB: throttle · WHEEL: speed", 4.5);
+        }
+
+        // ---- D: take the dragon's reins (or release it) ----
+        // "D" is already a movement key in most states (steer the car/plane,
+        // walk right on foot), so it only summons the dragon where it is
+        // otherwise free: riding an elephant, in a (nearly) stopped car, or
+        // while already on the dragon (to release it).
+        let d_is_free = self.in_dragon
+            || self.riding.is_some()
+            || (!self.on_foot && !self.in_plane && self.car.speed() < 5.0);
+        if input.just_pressed("d") && d_is_free {
+            if self.in_dragon {
+                // Release: drop to the street below, and hand the dragon back
+                // to its own meander from the altitude it was left at.
+                let (dx, dy, dz, dh) = (
+                    self.wildlife.dragon.x,
+                    self.wildlife.dragon.y,
+                    self.wildlife.dragon.z,
+                    self.wildlife.dragon.heading,
+                );
+                self.in_dragon = false;
+                self.wildlife.dragon.z0 = dz;
+                self.wildlife.dragon.controlled = false;
+                self.on_foot = true;
+                let (mut fx, mut fy) = (dx, dy);
+                if let Some((x, y, _, _)) = self.city.collide_circle(fx, fy, FOOT_RADIUS) {
+                    (fx, fy) = (x, y);
+                }
+                self.foot_x = fx;
+                self.foot_y = fy;
+                self.foot_heading = dh;
+                self.set_msg("BACK ON THE GROUND — D: take the dragon again", 3.5);
+            } else {
+                self.in_dragon = true;
+                self.wildlife.dragon.controlled = true;
+                self.wildlife.dragon.vz = 0.0;
+                self.view_3d = true; // you fly it best from the 3D chase cam
+                self.on_foot = false;
+                self.in_plane = false;
+                self.riding = None;
+                self.set_msg(
+                    "DRAGON — W/S: speed · A/D or DRAG: turn · SHIFT/SPACE: climb/dive · D: release",
+                    5.0,
+                );
+            }
         }
 
         // ---- M: auto-land at the nearest safe space (toggle) ----
@@ -327,7 +394,45 @@ impl GameState {
         }
 
         // ---- Player ----
-        let (px, py) = if let Some(idx) = self.riding {
+        let (px, py) = if self.in_dragon {
+            // Piloting the dragon. Keyboard + mouse, mirroring the airplane:
+            // LMB = full throttle, RMB = brake, drag = yaw + pitch (up = climb),
+            // wheel = cruise throttle; W/S/A/D/Shift/Space still work and win.
+            let mut inp = input.car_controls();
+            if inp.throttle == 0.0 {
+                inp.throttle = if input.mouse_right_state() {
+                    -1.0
+                } else if input.mouse_down_state() {
+                    1.0
+                } else {
+                    self.mouse_throttle
+                };
+            }
+            if inp.steer == 0.0 {
+                inp.steer = (mdx * 0.022).clamp(-1.0, 1.0);
+            }
+            if inp.pitch == 0.0 {
+                self.plane_pitch_stick += -mdy * 0.05;
+                self.plane_pitch_stick =
+                    (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
+                inp.pitch = self.plane_pitch_stick;
+            } else {
+                self.plane_pitch_stick = 0.0;
+            }
+            self.mouse_throttle =
+                (self.mouse_throttle + input.wheel_delta() * 0.15).clamp(0.0, 1.0);
+            let d = &mut self.wildlife.dragon;
+            d.step_controlled(&inp, DT);
+            // A thin contrail off the wingtips when fast and high, like the plane.
+            let sp = d.speed;
+            if d.z > 60.0 && sp > 260.0 && self.rng.below(3) == 0 {
+                let (cx, cy) = (d.heading.cos(), d.heading.sin());
+                for sy in [-1.0, 1.0] {
+                    self.fx.smoke(&mut self.rng, d.x - cx * 10.0 - cy * sy * 24.0, d.y - cy * 10.0 + cx * sy * 24.0, d.z + 5.0, -cx * sp * 0.1, -cy * sp * 0.1, 5.0, 1.5, 2.4, 0xf4f7fa, 0.3);
+                }
+            }
+            (d.x, d.y)
+        } else if let Some(idx) = self.riding {
             // The elephant carries the player: stay glued to its back.
             let e = self.wildlife.elephants[idx];
             self.foot_x = e.x;
@@ -490,10 +595,11 @@ impl GameState {
         }
 
         // ---- Pedestrians ----
-        // A plane above the rooftops is no threat to the streets below, and
-        // neither is a player strolling (or elephant-riding) on the ground.
+        // A plane or dragon above the rooftops is no threat to the streets
+        // below, and neither is a player strolling (or elephant-riding).
         let threat_speed = if self.on_foot
             || self.riding.is_some()
+            || self.in_dragon
             || (self.in_plane && self.plane.z > 15.0)
         {
             0.0
@@ -501,15 +607,21 @@ impl GameState {
             self.active_vehicle().speed()
         };
         self.update_peds(threat_speed);
-        self.ped_collisions(&mut events, px, py, threat_speed);
+        if !self.in_dragon {
+            self.ped_collisions(&mut events, px, py, threat_speed);
+        }
 
         // ---- Traffic ----
         for t in self.traffic.iter_mut() {
             t.update(DT, &mut self.rng, &self.city, px, py);
         }
-        self.traffic_collisions(&mut events, px, py);
+        if !self.in_dragon {
+            self.traffic_collisions(&mut events, px, py);
+        }
 
-        // ---- Wildlife (elephants on the streets, birds overhead) ----
+        // ---- Wildlife (elephants on the streets, birds overhead, the dragon) ----
+        // Keep the dragon's control flag in sync with the mode each tick.
+        self.wildlife.dragon.controlled = self.in_dragon;
         self.wildlife.update(
             DT,
             &mut self.rng,
@@ -519,7 +631,9 @@ impl GameState {
             py,
             threat_speed,
         );
-        self.elephant_collisions(&mut events, px, py, threat_speed);
+        if !self.in_dragon {
+            self.elephant_collisions(&mut events, px, py, threat_speed);
+        }
 
         // Walking elephants kick up a trail of street dust.
         for e in self.wildlife.elephants.iter() {
@@ -850,39 +964,44 @@ impl GameState {
     fn update_police_and_heat(&mut self, events: &mut Vec<Event>, px: f64, py: f64) {
         let s = self.stars();
 
-        // Keep the police squad sized to the star level.
-        // (An elephant rider is a pedestrian as far as catching goes.)
-        let want = s as usize;
-        while self.police.len() < want {
-            let extra = crate::police::spawn_police(&mut self.rng, &self.city, px, py, 1);
-            self.police.extend(extra);
-        }
-        if self.police.len() > want {
-            self.police.truncate(want);
-        }
-
-        let mut caught = false;
-        if !self.police.is_empty() {
-            let catch = if self.on_foot || self.riding.is_some() {
-                26.0
-            } else {
-                40.0
-            };
-            caught = crate::police::update_police(
-                &mut self.police,
-                &self.city,
-                px,
-                py,
-                s,
-                DT,
-                catch,
-            );
-            // Bust: caught while slow (in car) or caught on foot at all.
-            let slow = if self.on_foot { true } else { self.car.speed() < 40.0 };
-            if caught && slow {
-                self.busted();
-                events.push(Event::Busted);
+        // The dragon rides above the streets, where the patrol can't reach it:
+        // no squad is kept up while the player is on it (heat still decays).
+        if !self.in_dragon {
+            // Keep the police squad sized to the star level.
+            // (An elephant rider is a pedestrian as far as catching goes.)
+            let want = s as usize;
+            while self.police.len() < want {
+                let extra = crate::police::spawn_police(&mut self.rng, &self.city, px, py, 1);
+                self.police.extend(extra);
             }
+            if self.police.len() > want {
+                self.police.truncate(want);
+            }
+
+            if !self.police.is_empty() {
+                let catch = if self.on_foot || self.riding.is_some() {
+                    26.0
+                } else {
+                    40.0
+                };
+                let caught = crate::police::update_police(
+                    &mut self.police,
+                    &self.city,
+                    px,
+                    py,
+                    s,
+                    DT,
+                    catch,
+                );
+                // Bust: caught while slow (in car) or caught on foot at all.
+                let slow = if self.on_foot { true } else { self.car.speed() < 40.0 };
+                if caught && slow {
+                    self.busted();
+                    events.push(Event::Busted);
+                }
+            }
+        } else {
+            self.police.clear();
         }
 
         // Heat decay.
@@ -893,7 +1012,6 @@ impl GameState {
             self.time - self.last_crime,
             nearest,
         );
-        let _ = caught;
     }
 
     fn busted(&mut self) {
@@ -915,6 +1033,9 @@ impl GameState {
         self.plane.vz = 0.0;
         self.plane.z = 0.0;
         self.in_plane = false;
+        self.in_dragon = false; // a bust grounds you
+        self.wildlife.dragon.controlled = false;
+        self.wildlife.dragon.z0 = self.wildlife.dragon.z;
         self.on_foot = false;
         self.riding = None; // a bust unhorses you
         self.foot_x = sx;
@@ -976,6 +1097,88 @@ mod tests {
         inp.key_down("v");
         s.tick(&mut inp);
         assert!(!s.view_3d, "pressing V again returns to top-down");
+    }
+
+    #[test]
+    fn d_mounts_the_dragon_and_controls_it() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Let the world run so the dragon reaches its cruise altitude.
+        for _ in 0..60 {
+            s.tick(&mut inp);
+        }
+        let cruise_z = s.wildlife.dragon.z;
+        assert!(cruise_z > 200.0, "dragon should be cruising high: {}", cruise_z);
+
+        // The car is parked (speed 0), so D is free to summon the dragon.
+        keypress(&mut inp, "d");
+        s.tick(&mut inp);
+        assert!(s.in_dragon, "D should mount the dragon");
+        assert!(s.view_3d, "mounting the dragon should switch to 3D");
+        assert!(s.wildlife.dragon.controlled, "the dragon should be player-controlled");
+        inp.key_up("d");
+        inp.end_frame();
+
+        // Throttle + climb: the dragon should gain speed and altitude.
+        let z0 = s.wildlife.dragon.z;
+        inp.key_down("w");
+        inp.key_down("shift");
+        for _ in 0..120 {
+            s.tick(&mut inp);
+        }
+        assert!(
+            s.wildlife.dragon.z > z0 + 20.0,
+            "climbing should raise the dragon: {} -> {}",
+            z0,
+            s.wildlife.dragon.z
+        );
+        assert!(s.wildlife.dragon.speed > 100.0, "should be flying fast");
+        inp.key_up("w");
+        inp.key_up("shift");
+        inp.end_frame();
+
+        // Release: drop to the street below the dragon, on foot.
+        keypress(&mut inp, "d");
+        s.tick(&mut inp);
+        assert!(!s.in_dragon, "D should release the dragon");
+        assert!(s.on_foot, "releasing the dragon should put you on foot");
+        assert!(!s.wildlife.dragon.controlled, "the dragon should fly on its own again");
+        let (px, py) = s.player_pos();
+        let d = &s.wildlife.dragon;
+        let dist = ((px - d.x).powi(2) + (py - d.y).powi(2)).sqrt();
+        assert!(dist < 60.0, "should land near the dragon: {} px off", dist);
+    }
+
+    #[test]
+    fn d_does_nothing_while_driving_the_car() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Drive the car up to speed, then press D: it should steer, not summon.
+        inp.key_down("w");
+        for _ in 0..120 {
+            s.tick(&mut inp);
+        }
+        assert!(s.car.speed() > 100.0, "the car should be moving");
+        inp.key_up("w");
+        inp.end_frame();
+        inp.key_down("d"); // steer right while moving fast
+        s.tick(&mut inp);
+        assert!(!s.in_dragon, "D should steer the car, not summon the dragon");
+    }
+
+    #[test]
+    fn d_does_nothing_on_foot() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Get out of the car (on foot), then press D: it should walk, not summon.
+        s.on_foot = true;
+        s.foot_x = s.car.x;
+        s.foot_y = s.car.y;
+        keypress(&mut inp, "d");
+        s.tick(&mut inp);
+        assert!(!s.in_dragon, "D should walk right on foot, not summon the dragon");
+        inp.key_up("d");
+        inp.end_frame();
     }
 
     #[test]

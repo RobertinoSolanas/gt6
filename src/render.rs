@@ -122,6 +122,7 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     for b in &s.wildlife.birds {
         draw_bird(ctx, b);
     }
+    draw_dragon(ctx, &s.wildlife.dragon);
     draw_fx(ctx, &s.fx, &view);
 
     // ---- HUD (screen space) ----
@@ -857,6 +858,69 @@ fn draw_bird(ctx: &CanvasRenderingContext2d, b: &crate::wildlife::Bird) {
     ctx.restore();
 }
 
+/// Top-down dragon: a big bronze body with flapping swept wings, a long
+/// tail and a faint shadow on the streets far below.
+fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
+    // Faint shadow on the ground (it is high up, so it's small and soft).
+    let shk = (260.0 / (150.0 + d.z)).clamp(0.3, 1.0);
+    ctx.set_fill_style_str("rgba(0,0,0,0.10)");
+    ctx.begin_path();
+    ctx.ellipse(d.x, d.y, 24.0 * shk, 10.0 * shk, 0.0, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+
+    let bronze = 0x8a5c22;
+    let k = (300.0 / (150.0 + d.z)).clamp(0.35, 1.15);
+    let flap = 0.5 + 0.5 * d.flap.sin(); // 0..1 wing cycle
+    let ext = (0.35 + 0.65 * flap) * 22.0 * k;
+
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.rotate(d.heading);
+    // Tail, swept back.
+    ctx.set_fill_style_str(&shade(bronze, 0.78));
+    ctx.begin_path();
+    ctx.move_to(-10.0 * k, -2.0 * k);
+    ctx.quadratic_curve_to(-20.0 * k, 0.0, -30.0 * k, 1.5 * k);
+    ctx.quadratic_curve_to(-22.0 * k, 2.5 * k, -11.0 * k, 2.5 * k);
+    ctx.close_path();
+    ctx.fill();
+    // Wings, sweeping with the beat.
+    for sy in [-1.0, 1.0] {
+        ctx.set_fill_style_str(&shade(bronze, 0.92));
+        ctx.begin_path();
+        ctx.move_to(4.0 * k, sy * 1.5 * k);
+        ctx.quadratic_curve_to(-2.0 * k, sy * ext * 0.75, -8.0 * k, sy * ext);
+        ctx.quadratic_curve_to(-6.0 * k, sy * ext * 0.35, -9.0 * k, sy * 1.8 * k);
+        ctx.close_path();
+        ctx.fill();
+        // Sunlit leading edge.
+        ctx.set_fill_style_str(&shade(bronze, 1.15));
+        ctx.begin_path();
+        ctx.move_to(4.0 * k, sy * 1.5 * k);
+        ctx.quadratic_curve_to(-1.0 * k, sy * ext * 0.7, -8.0 * k, sy * ext);
+        ctx.quadratic_curve_to(-4.0 * k, sy * ext * 0.6, 4.0 * k, sy * 1.5 * k);
+        ctx.close_path();
+        ctx.fill();
+    }
+    // Body + head + neck.
+    ctx.set_fill_style_str(&rgb(bronze));
+    ctx.begin_path();
+    ctx.ellipse(-1.0 * k, 0.0, 12.0 * k, 4.5 * k, 0.0, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+    ctx.begin_path();
+    ctx.ellipse(11.0 * k, 0.0, 5.0 * k, 3.0 * k, 0.0, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+    ctx.begin_path();
+    ctx.arc(15.5 * k, 0.0, 2.2 * k, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+    // Horn glint.
+    ctx.set_fill_style_str(&shade(bronze, 1.5));
+    ctx.begin_path();
+    ctx.arc(15.5 * k, 0.0, 0.8 * k, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+    ctx.restore();
+}
+
 fn draw_person(
     ctx: &CanvasRenderingContext2d,
     x: f64,
@@ -1031,13 +1095,24 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
         ctx.set_fill_style_str("#9ad1ff");
         ctx.fill_text(&format!("ALT {}m · THR {}%", alt, thr), 20.0, h - 68.0);
     }
+    // Altitude + cruise throttle (bottom-left) when riding the dragon.
+    if s.in_dragon && s.wildlife.dragon.z > 5.0 {
+        let d = &s.wildlife.dragon;
+        let alt = (d.z * 2.0).round() as u32;
+        let thr = (s.mouse_throttle * 100.0).round() as u32;
+        ctx.set_fill_style_str("rgba(0,0,0,0.45)");
+        ctx.fill_rect(14.0, h - 84.0, 210.0, 22.0);
+        ctx.set_fill_style_str("#ffd08a");
+        ctx.fill_text(&format!("DRAGON · ALT {}m · THR {}%", alt, thr), 20.0, h - 68.0);
+    }
     // Speed (bottom-left) when in a car, with a colored speed bar.
     if s.riding.is_some() {
         ctx.set_fill_style_str("rgba(255,255,255,0.7)");
         ctx.set_font(FONT);
         ctx.fill_text("ON AN ELEPHANT — Z: jump off", 16.0, h - 24.0);
     } else if !s.on_foot {
-        let kmh = (s.active_vehicle().speed() * 0.18).round() as u32;
+        let spd = if s.in_dragon { s.wildlife.dragon.speed } else { s.active_vehicle().speed() };
+        let kmh = (spd * 0.18).round() as u32;
         ctx.set_fill_style_str("rgba(0,0,0,0.45)");
         fill_round(ctx, 12.0, h - 56.0, 120.0, 40.0, 8.0);
         ctx.set_font("bold 24px 'Segoe UI', system-ui, sans-serif");
@@ -1053,7 +1128,7 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     } else {
         ctx.set_fill_style_str("rgba(255,255,255,0.7)");
         ctx.set_font(FONT);
-        ctx.fill_text("ON FOOT — E: enter vehicle · F: plane", 16.0, h - 24.0);
+        ctx.fill_text("ON FOOT — E: enter vehicle · F: plane · D: dragon", 16.0, h - 24.0);
     }
 
     // Mission timer.

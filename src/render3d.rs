@@ -20,10 +20,24 @@ const SUN: V = V::new(0.45, -0.55, 0.70);
 
 type Pts = Vec<(f64, f64)>;
 
+/// One projected triangle of the dragon mesh: `(depth, color key, 3 screen
+/// points)`. Faces sharing a color key are drawn as one batched path.
+struct DragonFace {
+    depth: f64,
+    key: u32,
+    pts: [f64; 6],
+}
+
 /// Renderer state for one frame (css-px coordinates).
 struct R3<'a> {
     ctx: &'a CanvasRenderingContext2d,
     cam: Cam3D,
+    /// The dragon's baked GLB mesh, if the async load finished.
+    dmesh: Option<&'a crate::wildlife::DragonMesh>,
+    /// Scratch: transformed dragon vertex positions (x, y, z triples).
+    vtx: Vec<f64>,
+    /// Scratch: projected dragon faces for this frame.
+    faces: Vec<DragonFace>,
 }
 
 impl R3<'_> {
@@ -818,6 +832,173 @@ fn draw_bird(r: &R3, b: &crate::wildlife::Bird) {
     draw_cyl(r, p(w * 0.42, 0.0, 0.6), p(w * 0.42 + 3.2, 0.0, 0.5), 0.9, 0.05, 6, 0.9, b.beak);
 }
 
+/// The dragon, from its GLB model: transform all vertices (bank roll +
+/// wingbeat + heading), back-face cull, project, sun-shade with the baked
+/// vertex colors, fog by depth, and draw each color-quantized batch of
+/// triangles as a single canvas path (far → near within a batch).
+fn draw_dragon_mesh(r: &mut R3, d: &crate::wildlife::Dragon, m: &crate::wildlife::DragonMesh) {
+    // Soft ground shadow, fading out with altitude.
+    let a = (0.22 * (1.0 - (d.z - 150.0) / 900.0)).clamp(0.05, 0.22);
+    shadow_rot(r, d.x, d.y, d.heading, m.half_span * 0.85, 12.0, a);
+
+    let n = m.vpos.len();
+    if n == 0 {
+        return;
+    }
+    let (ch, sh) = (d.heading.cos(), d.heading.sin());
+    let (cb, sb) = (d.bank.cos(), d.bank.sin());
+    let flap = d.flap.sin() * m.half_span * 0.25;
+
+    // Local (x forward, y left, z up) -> world, with bank roll + wingbeat.
+    r.vtx.resize(n * 3, 0.0);
+    for i in 0..n {
+        let v = m.vpos[i];
+        let lz = v[2] + flap * m.vwing[i];
+        let ly = v[1] * cb - lz * sb;
+        let lz2 = v[1] * sb + lz * cb;
+        r.vtx[i * 3] = d.x + ch * v[0] - sh * ly;
+        r.vtx[i * 3 + 1] = d.y + sh * v[0] + ch * ly;
+        r.vtx[i * 3 + 2] = d.z + lz2;
+    }
+
+    let cp = r.cam.pos;
+    let sun = SUN.normalized();
+    let (w, h) = (r.cam.w, r.cam.h);
+    r.faces.clear();
+    r.faces.reserve(m.tris.len() / 2);
+    for (ti, tri) in m.tris.iter().enumerate() {
+        let [a, b, c] = (*tri).map(|i| i as usize * 3);
+        let p0 = [r.vtx[a], r.vtx[a + 1], r.vtx[a + 2]];
+        let p1 = [r.vtx[b], r.vtx[b + 1], r.vtx[b + 2]];
+        let p2 = [r.vtx[c], r.vtx[c + 1], r.vtx[c + 2]];
+        // Face normal (world), back-face cull.
+        let nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        let ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        let nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        let nl = (nx * nx + ny * ny + nz * nz).sqrt();
+        if nl < 1e-12 {
+            continue;
+        }
+        if nx * (cp.x - p0[0]) + ny * (cp.y - p0[1]) + nz * (cp.z - p0[2]) <= 0.0 {
+            continue;
+        }
+        // Project; skip if any vertex is behind the near plane.
+        let pa = r.cam.project(V::new(p0[0], p0[1], p0[2]));
+        let pb = r.cam.project(V::new(p1[0], p1[1], p1[2]));
+        let pc = r.cam.project(V::new(p2[0], p2[1], p2[2]));
+        let (Some(pa), Some(pb), Some(pc)) = (pa, pb, pc) else {
+            continue;
+        };
+        let s = [[pa.0, pa.1], [pb.0, pb.1], [pc.0, pc.1]];
+        let depth = (pa.2 + pb.2 + pc.2) / 3.0;
+        // Screen-space cull: all vertices off one side of the viewport,
+        // or the whole triangle projects sub-pixel.
+        let x0 = s.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+        let x1 = s.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+        let y0 = s.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
+        let y1 = s.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+        if x1 < -80.0 || x0 > w + 80.0 || y1 < -80.0 || y0 > h + 80.0 {
+            continue;
+        }
+        if (x1 - x0) * (y1 - y0) < 0.15 {
+            continue;
+        }
+        // Lighting: baked triangle color, sun term, belly shade, fog.
+        let (nxx, nyy, nzz) = (nx / nl, ny / nl, nz / nl);
+        let mut k = 0.52 + 0.55 * sun.dot(V::new(nxx, nyy, nzz)).max(0.0);
+        if nzz < -0.2 {
+            k *= 0.82; // the belly stays in shade
+        }
+        k = k.min(1.45);
+        let fogf = ((depth - 400.0) / 2600.0).clamp(0.0, 0.55);
+        let col = m.tric[ti];
+        let fog = [(FOG_COLOR >> 16) as f64, (FOG_COLOR >> 8) as f64, FOG_COLOR as f64];
+        let mixq = |c: u32, f: f64| -> u32 {
+            let v = ((c as f64) * k).clamp(0.0, 255.0);
+            let vf = v * (1.0 - fogf) + f * fogf;
+            ((vf / 255.0 * 8.0).round() as u32).clamp(0, 7)
+        };
+        let key = mixq((col >> 16) & 0xff, fog[0]) << 6 | mixq((col >> 8) & 0xff, fog[1]) << 3 | mixq(col & 0xff, fog[2]);
+        r.faces.push(DragonFace { depth, key, pts: [s[0][0], s[0][1], s[1][0], s[1][1], s[2][0], s[2][1]] });
+    }
+
+    // Sort by color key, then far → near, so each color batch is one path.
+    r.faces.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.depth.total_cmp(&a.depth)));
+    let mut i = 0;
+    while i < r.faces.len() {
+        let key = r.faces[i].key;
+        r.ctx.begin_path();
+        while i < r.faces.len() && r.faces[i].key == key {
+            let p = r.faces[i].pts;
+            r.ctx.move_to(p[0], p[1]);
+            r.ctx.line_to(p[2], p[3]);
+            r.ctx.line_to(p[4], p[5]);
+            r.ctx.close_path();
+            i += 1;
+        }
+        let c = key_key_color(key);
+        r.ctx.set_fill_style_str(&c);
+        r.ctx.fill();
+    }
+}
+
+/// Rebuild the quantized 3-bits-per-channel color key into a css string.
+fn key_key_color(key: u32) -> String {
+    let r = ((key >> 6) & 7) * 32 + 16;
+    let g = ((key >> 3) & 7) * 32 + 16;
+    let b = (key & 7) * 32 + 16;
+    format!("#{:02x}{:02x}{:02x}", r, g, b)
+}
+
+/// Low-poly silhouette of the dragon (far away, or while the GLB is still
+/// loading): swept wings, long neck, head, tail and a banked body.
+fn draw_dragon_silhouette(r: &R3, d: &crate::wildlife::Dragon) {
+    let span = 48.0;
+    let len = 34.0;
+    let bronze = 0x8a5c22;
+    let bronze_dark = 0x6f4a1e;
+    shadow2(r, d.x, d.y, 26.0, 12.0, 0.10);
+
+    let (fx, fy) = (d.heading.cos(), d.heading.sin());
+    let (cb, sb) = (d.bank.cos(), d.bank.sin());
+    let flap = d.flap.sin();
+    // Local (lx forward, ly left, lz up) -> world, with bank.
+    let p = |lx: f64, ly: f64, lz: f64| {
+        let ly2 = ly * cb - lz * sb;
+        let lz2 = ly * sb + lz * cb;
+        V::new(d.x + fx * lx - fy * ly2, d.y + fy * lx + fx * ly2, d.z + lz2)
+    };
+    let wy = flap * span * 0.10;
+
+    // Tail, swept back.
+    fill_shaded(
+        r,
+        &[
+            p(-len * 0.35, 0.0, 0.0),
+            p(-len * 0.72, 0.0, 2.0),
+            p(-len * 0.52, 0.0, -1.5),
+        ],
+        bronze_dark,
+    );
+    // Wings: swept from the shoulders to the tips, lifting with the beat.
+    for sy in [-1.0, 1.0] {
+        fill_shaded(
+            r,
+            &[
+                p(len * 0.12, sy * 2.0, 1.0),
+                p(-len * 0.18, sy * 3.0, 1.5),
+                p(-len * 0.30, sy * span * 0.5, 1.0 + wy),
+                p(-len * 0.42, sy * span * 0.30, 0.5 + wy * 0.8),
+            ],
+            bronze,
+        );
+    }
+    // Body (hips → chest), rising neck and head.
+    draw_cyl(r, p(-len * 0.35, 0.0, 0.0), p(len * 0.22, 0.0, 1.5), 5.5, 4.0, 9, 0.9, bronze);
+    draw_cyl(r, p(len * 0.22, 0.0, 1.5), p(len * 0.42, 0.0, 5.5), 3.6, 2.4, 8, 0.9, bronze);
+    draw_cyl(r, p(len * 0.42, 0.0, 5.5), p(len * 0.52, 0.0, 5.0), 2.4, 1.2, 7, 1.0, bronze_dark);
+}
+
 enum Kind {
     Building { x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32 },
     Car {
@@ -836,6 +1017,7 @@ enum Kind {
     Ped { x: f64, y: f64, color: u32, dead: bool, lift: f64 },
     Elephant(crate::wildlife::Elephant),
     Bird(crate::wildlife::Bird),
+    Dragon(crate::wildlife::Dragon),
     Tree { x: f64, y: f64, r: f64 },
     Marker { x: f64, y: f64, green: bool, pulse: f64 },
 }
@@ -861,7 +1043,9 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     let (px, py) = s.player_pos();
     // The chase cam rides along at the player's altitude (in the plane).
     let alt = s.player_alt();
-    let speed = if s.on_foot {
+    let speed = if s.in_dragon {
+        s.wildlife.dragon.speed
+    } else if s.on_foot {
         0.0
     } else if let Some(i) = s.riding {
         let e = &s.wildlife.elephants[i];
@@ -875,6 +1059,10 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     } else if s.riding.is_some() {
         // A bit further back and higher so the whole elephant is in frame.
         (135.0, 75.0)
+    } else if s.in_dragon {
+        // Ride close behind and just above the dragon's back, so the beast is
+        // centered in the frame rather than low beneath the camera.
+        (175.0 + 95.0 * t, 46.0 + 30.0 * t)
     } else {
         (140.0 + 140.0 * t, 85.0 + 70.0 * t)
     };
@@ -886,7 +1074,13 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         h,
     )
     .with_pitch(s.cam3d_pitch);
-    let r = R3 { ctx, cam };
+    let mut r = R3 {
+        ctx,
+        cam,
+        dmesh: s.dragon_mesh.as_ref(),
+        vtx: Vec::new(),
+        faces: Vec::new(),
+    };
 
     // ---- Sky (horizon shifts with the user's pitch) ----
     let horizon = cam.horizon().clamp(0.0, h);
@@ -1120,6 +1314,10 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     for b in &s.wildlife.birds {
         push(&mut items, dist2(cpos, b.x, b.y, b.z), Kind::Bird(*b));
     }
+    {
+        let d = &s.wildlife.dragon;
+        push(&mut items, dist2(cpos, d.x, d.y, d.z), Kind::Dragon(*d));
+    }
     if s.on_foot || s.riding.is_some() {
         let (lx, ly) = s.player_pos();
         // The rider stands on the elephant's back.
@@ -1178,6 +1376,15 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
             }
             Kind::Bird(b) => {
                 draw_bird(&r, b);
+            }
+            Kind::Dragon(d) => {
+                // Full GLB model up close; a low-poly silhouette when the
+                // mesh is far away (too small to resolve) or not loaded yet.
+                let d2 = dist2(cam.pos, d.x, d.y, d.z);
+                match r.dmesh {
+                    Some(m) if d2 < 1300.0 * 1300.0 => draw_dragon_mesh(&mut r, d, m),
+                    _ => draw_dragon_silhouette(&r, d),
+                }
             }
             Kind::Plane { x, y, z, heading } => {
                 draw_plane(&r, *x, *y, *z, *heading, s.time);
