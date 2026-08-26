@@ -193,6 +193,8 @@ pub fn start() {
                     }
                 }
                 Event::Busted => a.busted(),
+                Event::Fireball => a.fireball(),
+                Event::BuildingDown => a.boom(),
                 _ => {}
             }
         }
@@ -427,6 +429,23 @@ fn try_fetch_dragon(window: web_sys::Window, state: Rc<RefCell<GameState>>, url:
     let _ = promise.catch(&on_reject);
     on_response.forget();
     on_reject.forget();
+}
+
+/// Debug/test: `[fireballs in flight, burning buildings, citizens
+/// fighting a fire]` (the dragon's breath damage counters).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_dragonfire() -> Array {
+    let a = Array::new();
+    // SAFETY: single-threaded wasm game loop.
+    let state = unsafe { STATE.as_ref().cloned() };
+    if let Some(s) = state {
+        let s = s.borrow();
+        a.push(&JsValue::from_f64(s.fireballs.len() as f64));
+        a.push(&JsValue::from_f64(s.building_fires.iter().filter(|f| f.burn > 0.0).count() as f64));
+        a.push(&JsValue::from_f64(s.peds.iter().filter(|p| p.firefight.is_some()).count() as f64));
+    }
+    a
 }
 
 /// Debug/test: wildlife snapshot as a flat f64 array:

@@ -83,4 +83,16 @@ impl Audio {
         self.tone(392.0, 0.3, 0.25, 0.0);
         self.tone(311.13, 0.5, 0.25, 0.25);
     }
+
+    pub fn fireball(&mut self) {
+        // A hot whoosh: descending growl.
+        self.tone(300.0, 0.18, 0.2, 0.0);
+        self.tone(180.0, 0.22, 0.18, 0.1);
+    }
+
+    pub fn boom(&mut self) {
+        // Deep building-down blast.
+        self.tone(70.0, 0.5, 0.4, 0.0);
+        self.tone(48.0, 0.7, 0.35, 0.12);
+    }
 }

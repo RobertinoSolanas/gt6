@@ -123,6 +123,17 @@ impl R3<'_> {
     }
 }
 
+/// Mix 0xRRGGBB `a` toward `b` by `t` (0..1), as a u32.
+fn mix_c(a: u32, b: u32, t: f64) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |sh: u32| {
+        let x = ((a >> sh) & 0xff) as f64;
+        let y = ((b >> sh) & 0xff) as f64;
+        ((x * (1.0 - t) + y * t).round() as u8) as u32
+    };
+    (m(16) << 16) | (m(8) << 8) | m(0)
+}
+
 /// 0xRRGGBB scaled toward black/white by `k` (k=1 is unchanged), as a u32.
 fn brighten(c: u32, k: f64) -> u32 {
     let k = k.clamp(0.0, 1.6);
@@ -330,8 +341,30 @@ fn draw_windows(r: &R3, c: &[V; 8], ht: f64) {
 }
 
 /// Building: shaded box + windows + parapet outline + base AO + rooftop
-/// props (AC unit, water tower, helipad, antenna).
-fn draw_building(r: &R3, x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32, time: f64) {
+/// props (AC unit, water tower, helipad, antenna). A dragonfire-hit building
+/// squashes as it comes down, chars, and ends as a pile of rubble.
+fn draw_building(
+    r: &R3,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    ht: f64,
+    color: u32,
+    time: f64,
+    ht_scale: f64,
+    burning: bool,
+    charred: bool,
+) {
+    // Fully collapsed: just the rubble pile remains.
+    if charred {
+        draw_rubble_3d(r, x, y, w, h);
+        return;
+    }
+    // Squash the height while the building comes down, and char the facade.
+    let ht = (ht * ht_scale.max(0.06)).max(4.0);
+    let char = ((1.0 - ht_scale) * 0.75 + if burning { 0.15 } else { 0.0 }).clamp(0.0, 0.85);
+    let color = mix_c(color, 0x2a211b, char);
     // Camera inside (or close around) this box: skip it entirely —
     // near-plane-clipped walls would smear fullscreen slivers across the view.
     let cp = r.cam.pos;
@@ -436,6 +469,41 @@ fn draw_building(r: &R3, x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32, ti
             }
             _ => {}
         }
+    }
+}
+
+/// A collapsed building: scorched ground, a pile of charred rubble blocks
+/// and a couple of twisted girders sticking out.
+fn draw_rubble_3d(r: &R3, x: f64, y: f64, w: f64, h: f64) {
+    // Scorch mark over the whole lot.
+    r.fill_poly(
+        &[
+            V::new(x - 5.0, y - 5.0, 0.1),
+            V::new(x + w + 5.0, y - 5.0, 0.1),
+            V::new(x + w + 5.0, y + h + 5.0, 0.1),
+            V::new(x - 5.0, y + h + 5.0, 0.1),
+        ],
+        "#191411",
+    );
+    let hsh = ((x * 131.7 + y * 97.3) as i64).unsigned_abs() as u32;
+    let cols = [0x4d443c, 0x5a5048, 0x3f3833, 0x6a5f55, 0x332d29];
+    for q in 0..7 {
+        let t = ((hsh >> (q * 4)) % 997) as f64 / 997.0;
+        let u = ((hsh >> (q * 4 + 1)) % 991) as f64 / 991.0;
+        let bw = (w * 0.28).max(10.0) * (0.6 + 0.4 * ((hsh >> (q * 4 + 2)) % 101) as f64 / 101.0);
+        let bh = (h * 0.28).max(10.0) * (0.6 + 0.4 * ((hsh >> (q * 4 + 3)) % 101) as f64 / 101.0);
+        let bz = 3.0 + (hsh >> (q * 2)) as f64 % 9.0;
+        let bx = x + 5.0 + t * (w - bw - 5.0);
+        let by = y + 5.0 + u * (h - bh - 5.0);
+        draw_box(r, &box_ax(bx, by, bw, bh, bz), cols[q % cols.len()]);
+    }
+    // Twisted girders.
+    for q in 0..2 {
+        let t = ((hsh >> (11 + q * 5)) % 991) as f64 / 991.0;
+        let u = ((hsh >> (12 + q * 5)) % 997) as f64 / 997.0;
+        let gx = x + 10.0 + t * (w - 20.0);
+        let gy = y + 10.0 + u * (h - 20.0);
+        r.line3d(V::new(gx, gy, 4.0), V::new(gx + 9.0, gy + 5.0, 13.0 + q as f64 * 4.0), 2.0, "#4a443d");
     }
 }
 
@@ -955,8 +1023,10 @@ fn key_key_color(key: u32) -> String {
 fn draw_dragon_silhouette(r: &R3, d: &crate::wildlife::Dragon) {
     let span = 48.0;
     let len = 34.0;
-    let bronze = 0x8a5c22;
-    let bronze_dark = 0x6f4a1e;
+    let body = 0x27c46f; // emerald
+    let wing = 0xd94fc0; // magenta
+    let tailc = 0x3f7fe8; // sapphire
+    let headc = 0xff7a2e; // fiery orange
     shadow2(r, d.x, d.y, 26.0, 12.0, 0.10);
 
     let (fx, fy) = (d.heading.cos(), d.heading.sin());
@@ -978,7 +1048,7 @@ fn draw_dragon_silhouette(r: &R3, d: &crate::wildlife::Dragon) {
             p(-len * 0.72, 0.0, 2.0),
             p(-len * 0.52, 0.0, -1.5),
         ],
-        bronze_dark,
+        tailc,
     );
     // Wings: swept from the shoulders to the tips, lifting with the beat.
     for sy in [-1.0, 1.0] {
@@ -990,17 +1060,21 @@ fn draw_dragon_silhouette(r: &R3, d: &crate::wildlife::Dragon) {
                 p(-len * 0.30, sy * span * 0.5, 1.0 + wy),
                 p(-len * 0.42, sy * span * 0.30, 0.5 + wy * 0.8),
             ],
-            bronze,
+            wing,
         );
     }
     // Body (hips → chest), rising neck and head.
-    draw_cyl(r, p(-len * 0.35, 0.0, 0.0), p(len * 0.22, 0.0, 1.5), 5.5, 4.0, 9, 0.9, bronze);
-    draw_cyl(r, p(len * 0.22, 0.0, 1.5), p(len * 0.42, 0.0, 5.5), 3.6, 2.4, 8, 0.9, bronze);
-    draw_cyl(r, p(len * 0.42, 0.0, 5.5), p(len * 0.52, 0.0, 5.0), 2.4, 1.2, 7, 1.0, bronze_dark);
+    draw_cyl(r, p(-len * 0.35, 0.0, 0.0), p(len * 0.22, 0.0, 1.5), 5.5, 4.0, 9, 0.9, body);
+    draw_cyl(r, p(len * 0.22, 0.0, 1.5), p(len * 0.42, 0.0, 5.5), 3.6, 2.4, 8, 0.9, body);
+    draw_cyl(r, p(len * 0.42, 0.0, 5.5), p(len * 0.52, 0.0, 5.0), 2.4, 1.2, 7, 1.0, headc);
 }
 
 enum Kind {
-    Building { x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32 },
+    /// `ht_scale` 1->0 as the building collapses; `burning` = on fire;
+    /// `charred` = fully collapsed (drawn as rubble).
+    Building { x: f64, y: f64, w: f64, h: f64, ht: f64, color: u32, ht_scale: f64, burning: bool, charred: bool },
+    /// A fireball from the dragon's mouth, in flight.
+    Fireball { x: f64, y: f64, z: f64 },
     Car {
         x: f64,
         y: f64,
@@ -1259,15 +1333,20 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         }
     };
 
-    for blk in &s.city.blocks {
+    for (block_i, blk) in s.city.blocks.iter().enumerate() {
         match blk.kind {
             crate::city::BlockKind::Buildings => {
-                for lot in blk.buildings.iter().flatten() {
+                for (lot_i, lot) in blk.buildings.iter().enumerate().filter_map(|(i, o)| o.map(|l| (i, l))) {
                     let (cx, cy) = lot.center();
+                    let (ht_scale, burning, charred) =
+                        match s.building_fire(crate::state::building_id(block_i, lot_i)) {
+                            Some(f) => (1.0 - f.collapse, f.burn > 0.0, f.collapse >= 1.0),
+                            None => (1.0, false, false),
+                        };
                     push(
                         &mut items,
-                        dist2(cpos, cx, cy, lot.height / 2.0),
-                        Kind::Building { x: lot.x, y: lot.y, w: lot.w, h: lot.h, ht: lot.height, color: lot.color },
+                        dist2(cpos, cx, cy, (lot.height * ht_scale) / 2.0),
+                        Kind::Building { x: lot.x, y: lot.y, w: lot.w, h: lot.h, ht: lot.height, color: lot.color, ht_scale, burning, charred },
                     );
                 }
             }
@@ -1351,6 +1430,14 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         );
     }
 
+    for fb in &s.fireballs {
+        push(
+            &mut items,
+            dist2(cpos, fb.x, fb.y, fb.z),
+            Kind::Fireball { x: fb.x, y: fb.y, z: fb.z },
+        );
+    }
+
     if let Some((mx, my)) = s.mission.current_marker() {
         let green = matches!(s.mission.phase, crate::mission::MissionPhase::ToDeliver);
         let pulse = 1.0 + 0.15 * (s.time * 3.0).sin();
@@ -1365,8 +1452,22 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
 
     for it in &items {
         match &it.kind {
-            Kind::Building { x, y, w, h, ht, color } => {
-                draw_building(&r, *x, *y, *w, *h, *ht, *color, s.time);
+            Kind::Building { x, y, w, h, ht, color, ht_scale, burning, charred } => {
+                draw_building(&r, *x, *y, *w, *h, *ht, *color, s.time, *ht_scale, *burning, *charred);
+            }
+            Kind::Fireball { x, y, z } => {
+                if let Some((sx, sy, zc)) = cam.project(V::new(*x, *y, *z)) {
+                    let rad = (16.0 * cam.scale_at(zc)).max(2.0);
+                    let g = ctx.create_radial_gradient(sx, sy, 1.0, sx, sy, rad * 1.8).unwrap();
+                    let _ = g.add_color_stop(0.0, "rgba(255,250,225,0.98)");
+                    let _ = g.add_color_stop(0.3, "rgba(255,200,70,0.9)");
+                    let _ = g.add_color_stop(0.65, "rgba(255,110,25,0.5)");
+                    let _ = g.add_color_stop(1.0, "rgba(255,80,10,0.0)");
+                    ctx.set_fill_style(&JsValue::from(g));
+                    ctx.begin_path();
+                    ctx.arc(sx, sy, rad * 1.8, 0.0, std::f64::consts::TAU);
+                    ctx.fill();
+                }
             }
             Kind::Car { x, y, heading, len, wid, ht, color, police } => {
                 draw_car(&r, *x, *y, *heading, *len, *wid, *ht, *color, *police, s.time);
@@ -1534,7 +1635,9 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
     ctx.set_fill_style_str("rgba(0,0,0,0.45)");
     ctx.fill_rect(12.0, h - 108.0, 620.0, 26.0);
     ctx.set_fill_style_str("#9be7ff");
-    if s.in_plane {
+    if s.in_dragon {
+        ctx.fill_text("DRAGON — W/S: speed · A/D or DRAG: turn · SHIFT/SPACE: climb/dive · LMB: FIREBALL · RMB: brake · E: exit", 20.0, h - 90.0);
+    } else if s.in_plane {
         ctx.fill_text("PLANE — DRAG: steer · LMB: throttle · RMB: brake · WHEEL: speed", 20.0, h - 90.0);
     } else {
         ctx.fill_text("3D — DRAG: LOOK · C: RESET · V: TOP-DOWN", 20.0, h - 90.0);
@@ -1595,6 +1698,12 @@ fn draw_fx(r: &R3, fx: &crate::fx::Fx, w: f64, h: f64) {
             crate::fx::PKind::Debris => {
                 r.ctx.set_fill_style_str(&rgba_u(p.color, a));
                 r.ctx.fill_rect(sx - rad * 0.5, sy - rad * 0.5, rad, rad);
+            }
+            crate::fx::PKind::Water => {
+                r.ctx.set_fill_style_str(&rgba_u(p.color, a));
+                r.ctx.begin_path();
+                r.ctx.arc(sx, sy, rad * 0.6, 0.0, std::f64::consts::TAU);
+                r.ctx.fill();
             }
         }
     }

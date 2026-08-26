@@ -22,6 +22,9 @@ pub struct Ped {
     pub route: (usize, usize, u8),
     pub state: PedState,
     pub color: u32,
+    /// Some(building id) while this ped has dropped everything to hose down
+    /// a burning building (set/cleared by the game state, not `update`).
+    pub firefight: Option<u32>,
 }
 
 /// Bright shirt palette so the sidewalk crowd pops against the grey slabs.
@@ -61,6 +64,7 @@ impl Ped {
             route: (i, j, side),
             state: PedState::Alive,
             color: SHIRT[rng.below(SHIRT.len())],
+            firefight: None,
         }
     }
 

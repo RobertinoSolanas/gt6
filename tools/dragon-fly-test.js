@@ -1,4 +1,4 @@
-// Browser test for the dragon-control mode ("D"): mounts the dragon, flies it
+// Browser test for the dragon-control mode ("G"): mounts the dragon, flies it
 // with the keyboard (throttle + climb) and the mouse, screenshots the 3D chase
 // cam, then releases it back to the ground.
 //
@@ -42,14 +42,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}  ${detail}`);
   };
 
-  // --- Mount the dragon (the car is parked, so "D" is free) ---
-  await page.keyboard.down('d');
+  // --- Mount the dragon (G is the dedicated summon key) ---
+  await page.keyboard.down('g');
   await sleep(300);
-  await page.keyboard.up('d');
+  await page.keyboard.up('g');
   await sleep(200);
   let d = await dragon();
   let mode = await info();
-  log('D mounts the dragon', d[7] === 1, `in_dragon=${d[7]}  view=3D  alt=${mode.alt.toFixed(0)}`);
+  log('G mounts the dragon', d[7] === 1, `in_dragon=${d[7]}  view=3D  alt=${mode.alt.toFixed(0)}`);
 
   // --- Throttle + climb: the dragon should gain speed and altitude ---
   await page.keyboard.down('w');
@@ -82,14 +82,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.screenshot({ path: '/tmp/gt6_dragon_fly.png' });
 
   // --- Release: drop back to the street below, on foot ---
-  await page.keyboard.down('d');
+  await page.keyboard.down('e');
   await sleep(300);
-  await page.keyboard.up('d');
+  await page.keyboard.up('e');
   await sleep(300);
   const dRel = await dragon();
   const relInfo = await info();
   log(
-    'D releases the dragon',
+    'E releases the dragon',
     dRel[7] === 0 && relInfo.alt === 0,
     `in_dragon=${dRel[7]}  alt=${relInfo.alt.toFixed(0)}`
   );

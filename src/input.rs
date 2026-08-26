@@ -26,11 +26,13 @@ impl Input {
         Self::default()
     }
 
-    /// Keys we care about (normalized to lowercase).
+    /// Keys we care about (normalized to lowercase). The special-action keys
+    /// (E enter/exit, F plane, G dragon, M auto-land) never overlap the
+    /// movement keys (WASD/arrows/Shift/Space).
     pub const KEYS: [&str; 18] = [
         "w", "a", "s", "d",
         "arrowup", "arrowdown", "arrowleft", "arrowright",
-        " ", "shift", "e", "r", "p", "v", "c", "f", "m", "z",
+        " ", "shift", "e", "r", "p", "v", "c", "f", "m", "g",
     ];
 
     pub fn key_down(&mut self, key: &str) {

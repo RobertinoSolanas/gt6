@@ -202,8 +202,9 @@ pub struct Dragon {
     pub vz: f64,
     /// Per-individual timing offset so the flight path is not metronomic.
     pub seed: f64,
-    /// True while the player is piloting the dragon ("D"): the autonomous
-    /// meander in `update` is skipped and `step_controlled` drives it instead.
+    /// True while the player is piloting the dragon ("G" to summon, "E" to
+    /// exit): the autonomous meander in `update` is skipped and
+    /// `step_controlled` drives it instead.
     pub controlled: bool,
     /// The dragon owns its RNG so its flight never disturbs the shared
     /// per-tick stream (traffic, peds and police all draw from it, and the
@@ -347,11 +348,25 @@ impl Dragon {
 /// (wingspan ends up ~48, body ~34).
 pub const DRAGON_SCALE: f64 = 13.5;
 
-/// The dragon's GLB material is a translucent "attenuation" variant; its
-/// actual surface color (KHR_materials_volume attenuationColor, also used
-/// as the base color by the solid-color variant) is baked as a flat tint
-/// for the software rasterizer.
-const DRAGON_TINT: [u8; 3] = [0xeb, 0xa3, 0x10]; // bronze-gold
+/// HSV (h in [0,1), s/l in [0,1]) -> 0xRRGGBB. The dragon's colors are baked
+/// through this so it comes out a vivid, iridescent rainbow.
+pub fn hsl_rgb(h: f64, s: f64, l: f64) -> u32 {
+    let h = h.rem_euclid(1.0);
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let to = |v: f64| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u32;
+    (to(r) << 16) | (to(g) << 8) | to(b)
+}
 
 /// A baked, render-ready dragon mesh built from a parsed GLB. Local frame:
 /// x = forward (head), y = left, z = up, origin at the body center, scaled
@@ -421,24 +436,6 @@ impl DragonMesh {
             .map(|m| [-m[1], m[0], m[2]])
             .collect();
 
-        // Baked vertex colors (tinted bronze when the model has no base
-        // color texture, like the dragon's translucent variant does).
-        let vcol: Vec<u32> = (0..n)
-            .map(|i| {
-                let c = mesh.vertex_color(i);
-                let (r, g, b) = if mesh.texture.is_some() {
-                    (c[0] as u32, c[1] as u32, c[2] as u32)
-                } else {
-                    (
-                        c[0] as u32 * DRAGON_TINT[0] as u32 / 255,
-                        c[1] as u32 * DRAGON_TINT[1] as u32 / 255,
-                        c[2] as u32 * DRAGON_TINT[2] as u32 / 255,
-                    )
-                };
-                (r << 16) | (g << 8) | b
-            })
-            .collect();
-
         // Wingtip weight: 0 over the body, 1 at the wingtips.
         let vwing: Vec<f64> = vpos
             .iter()
@@ -446,6 +443,27 @@ impl DragonMesh {
                 let w = (v[1].abs() / half_span - 0.25) / 0.75;
                 let w = w.clamp(0.0, 1.0);
                 w * w
+            })
+            .collect();
+
+        // Baked vertex colors: a vivid iridescent rainbow instead of the
+        // model's muted material. The body runs blue (tail) -> green ->
+        // gold -> fiery red (head); the wings shift to a contrasting
+        // magenta/pink. The model's original texture luminance is kept as
+        // lightness so the baked geometry detail still reads.
+        let x0 = vpos.iter().map(|v| v[0]).fold(f64::INFINITY, f64::min);
+        let x1 = vpos.iter().map(|v| v[0]).fold(f64::NEG_INFINITY, f64::max);
+        let span_x = (x1 - x0).max(1e-6);
+        let vcol: Vec<u32> = (0..n)
+            .map(|i| {
+                let c = mesh.vertex_color(i);
+                let luma = (0.30 * c[0] as f64 + 0.59 * c[1] as f64 + 0.11 * c[2] as f64) / 255.0;
+                let t = ((vpos[i][0] - x0) / span_x).clamp(0.0, 1.0); // 0 tail -> 1 head
+                let wing = vwing[i];
+                let mut hue = 0.62 - 0.62 * t; // blue tail -> red head
+                hue += 0.42 * wing; // wings swing toward magenta/pink
+                let light = (0.34 + 0.32 * luma + 0.12 * wing).clamp(0.18, 0.74);
+                hsl_rgb(hue, 0.92, light)
             })
             .collect();
 
@@ -787,9 +805,17 @@ mod tests {
         // Wing weight: 1 at the widest vertex (|y| == half_span), 0 on the body.
         assert!((dm.vwing[2] - 1.0).abs() < 1e-9, "wing vertex has full flap weight");
         assert!(dm.vwing[0] < 0.01, "body vertex has no flap weight");
-        // No texture -> the bronze tint is baked in (not white).
-        assert_ne!(dm.tric[0] & 0xff0000, 0xff0000, "should be tinted bronze");
-        assert!(dm.tric[0] >> 16 > 0xcc, "reddish bronze: {:#08x}", dm.tric[0]);
+        // Colorful iridescent bake: the head (vtx 1) is fiery red, the tail
+        // (vtx 0) is blue, and the wing vertex (vtx 2) shifts magenta.
+        let head = dm.vcol[1];
+        let tail = dm.vcol[0];
+        let wing = dm.vcol[2];
+        assert_ne!(head, tail, "head and tail should be different colors");
+        assert!(head >> 16 > 180, "head should be fiery red: {:#08x}", head);
+        assert!(tail & 0xff > 150, "tail should be blue: {:#08x}", tail);
+        // Magenta wing: red+blue high, green clearly lower.
+        assert!(wing & 0xff > 100, "wing should be magenta-ish: {:#08x}", wing);
+        assert!(wing & 0xff > (wing >> 8 & 0xff), "wing green should be lowest: {:#08x}", wing);
     }
 
     #[test]

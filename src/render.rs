@@ -123,12 +123,12 @@ pub fn render(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64, dpr
         draw_bird(ctx, b);
     }
     draw_dragon(ctx, &s.wildlife.dragon);
+    draw_fireballs(ctx, s);
     draw_fx(ctx, &s.fx, &view);
 
     // ---- HUD (screen space) ----
     ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
     draw_vignette(ctx, w, h);
-    draw_hud(ctx, s, w, h);
     draw_hud(ctx, s, w, h);
     draw_overlays(ctx, s, w, h);
 }
@@ -300,8 +300,21 @@ fn draw_blocks(ctx: &CanvasRenderingContext2d, s: &GameState, view: &View) {
                         ctx.fill_rect(t, by, 1.5, BLOCK);
                         ctx.fill_rect(bx, by + (q as f64) * BLOCK / 4.0, BLOCK, 1.5);
                     }
-                    for lot in b.buildings.iter().flatten() {
+                    for (lot_i, lot) in b.buildings.iter().enumerate().filter_map(|(i, o)| o.map(|l| (i, l))) {
                         let (cx, cy) = lot.center();
+                        // Dragonfire state: fully collapsed buildings draw as
+                        // rubble instead of a roof.
+                        let fire = s.building_fire(crate::state::building_id(j * N + i, lot_i));
+                        if let Some(f) = fire {
+                            if f.collapse >= 1.0 {
+                                draw_rubble(ctx, lot.x, lot.y, lot.w, lot.h);
+                                if f.burn > 0.0 {
+                                    let hsh = ((lot.x * 131.7 + lot.y * 97.3) as i64).unsigned_abs();
+                                    draw_fire_overlay(ctx, lot.x, lot.y, lot.w, lot.h, s.time, hsh, true);
+                                }
+                                continue;
+                            }
+                        }
                         // Drop shadow onto the slab.
                         ctx.set_fill_style_str("rgba(0,0,0,0.20)");
                         ctx.fill_rect(lot.x + 5.0, lot.y + 6.0, lot.w, lot.h);
@@ -454,6 +467,16 @@ fn draw_blocks(ctx: &CanvasRenderingContext2d, s: &GameState, view: &View) {
                             }
                             _ => {}
                         }
+                        // Still-standing but hit: char the roof and flicker
+                        // flames over it while it burns.
+                        if let Some(f) = fire {
+                            let ch = (f.collapse * 0.45 + if f.burn > 0.0 { 0.2 } else { 0.0 }).min(0.65);
+                            ctx.set_fill_style_str(&rgba(0x1a120c, ch));
+                            ctx.fill_rect(lot.x, lot.y, lot.w, lot.h);
+                            if f.burn > 0.0 {
+                                draw_fire_overlay(ctx, lot.x, lot.y, lot.w, lot.h, s.time, hsh, false);
+                            }
+                        }
                     }
                 }
                 crate::city::BlockKind::Park => {
@@ -495,6 +518,84 @@ fn draw_blocks(ctx: &CanvasRenderingContext2d, s: &GameState, view: &View) {
                 }
             }
         }
+    }
+}
+
+/// A collapsed building, top-down: a scorched slab with a pile of rubble
+/// chunks on it.
+fn draw_rubble(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64) {
+    // Scorch mark over the whole lot (and a touch of the sidewalk).
+    ctx.set_fill_style_str("rgba(20,16,14,0.55)");
+    ctx.fill_rect(x - 4.0, y - 4.0, w + 8.0, h + 8.0);
+    // Deterministic rubble pile.
+    let hsh = ((x * 131.7 + y * 97.3) as i64).unsigned_abs();
+    let cols = [0x4d443c, 0x5a5048, 0x3f3833, 0x6a5f55, 0x332d29];
+    for q in 0..10 {
+        let t = ((hsh >> (q * 4)) % 997) as f64 / 997.0;
+        let u = ((hsh >> (q * 4 + 1)) % 991) as f64 / 991.0;
+        let bx = x + 5.0 + t * (w - 10.0);
+        let by = y + 5.0 + u * (h - 10.0);
+        let s = 4.5 + ((hsh >> (q * 4 + 2)) % 5) as f64 * 1.7;
+        ctx.set_fill_style_str(&rgb(cols[q % cols.len()]));
+        ctx.fill_rect(bx - s / 2.0, by - s / 2.0, s, s * 0.8);
+        // Slight sun edge on each chunk.
+        ctx.set_fill_style_str("rgba(255,255,255,0.12)");
+        ctx.fill_rect(bx - s / 2.0, by - s / 2.0, s, 1.2);
+    }
+}
+
+/// Flickering flames over a burning roof (or rubble pile). `seed` is a
+/// per-building hash so each fire flickers on its own.
+fn draw_fire_overlay(
+    ctx: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    time: f64,
+    seed: u64,
+    on_rubble: bool,
+) {
+    // Warm glow over the whole footprint.
+    let fl = 0.14 + 0.10 * (time * 9.0 + (seed % 37) as f64 * 0.31).sin();
+    ctx.set_fill_style_str(&rgba(0xff8c1e, fl));
+    ctx.fill_rect(x, y, w, h);
+    // Bright licking flames at deterministic spots.
+    for q in 0..5 {
+        let sx = x + 8.0 + (((seed >> (q * 3)) % 97) as f64 / 97.0) * (w - 16.0);
+        let sy = y + 8.0 + (((seed >> (q * 3 + 1)) % 89) as f64 / 89.0) * (h - 16.0);
+        let r = (if on_rubble { 4.5 } else { 6.5 }) + 3.0 * (time * 7.0 + q as f64 * 1.3).sin().abs();
+        let a = (0.45 + 0.35 * (time * 11.0 + q as f64 * 0.7).sin()).max(0.15);
+        ctx.set_fill_style_str(&rgba(0xffc23c, a));
+        ctx.begin_path();
+        ctx.ellipse(sx, sy, r, r * 0.7, 0.0, 0.0, std::f64::consts::TAU);
+        ctx.fill();
+        ctx.set_fill_style_str(&rgba(0xffffff, a * 0.5));
+        ctx.begin_path();
+        ctx.ellipse(sx, sy - r * 0.2, r * 0.45, r * 0.3, 0.0, 0.0, std::f64::consts::TAU);
+        ctx.fill();
+    }
+}
+
+/// Fireballs in flight: a glowing orb with a soft shadow on the street.
+fn draw_fireballs(ctx: &CanvasRenderingContext2d, s: &GameState) {
+    for b in &s.fireballs {
+        if b.z < 420.0 {
+            let a = (0.20 * (1.0 - b.z / 420.0)).max(0.04);
+            ctx.set_fill_style_str(&rgba(0x000000, a));
+            ctx.begin_path();
+            ctx.ellipse(b.x, b.y, b.r * 1.1, b.r * 0.8, 0.0, 0.0, std::f64::consts::TAU);
+            ctx.fill();
+        }
+        let g = ctx.create_radial_gradient(b.x, b.y, 0.5, b.x, b.y, b.r * 2.8).unwrap();
+        let _ = g.add_color_stop(0.0, "rgba(255,250,225,0.98)");
+        let _ = g.add_color_stop(0.3, "rgba(255,200,70,0.9)");
+        let _ = g.add_color_stop(0.65, "rgba(255,110,25,0.5)");
+        let _ = g.add_color_stop(1.0, "rgba(255,80,10,0.0)");
+        ctx.set_fill_style(&JsValue::from(g));
+        ctx.begin_path();
+        ctx.arc(b.x, b.y, b.r * 2.8, 0.0, std::f64::consts::TAU);
+        ctx.fill();
     }
 }
 
@@ -858,8 +959,9 @@ fn draw_bird(ctx: &CanvasRenderingContext2d, b: &crate::wildlife::Bird) {
     ctx.restore();
 }
 
-/// Top-down dragon: a big bronze body with flapping swept wings, a long
-/// tail and a faint shadow on the streets far below.
+/// Top-down dragon: a big iridescent body (emerald middle, magenta wings,
+/// blue tail, fiery head) with flapping swept wings and a faint shadow on
+/// the streets far below.
 fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
     // Faint shadow on the ground (it is high up, so it's small and soft).
     let shk = (260.0 / (150.0 + d.z)).clamp(0.3, 1.0);
@@ -868,7 +970,10 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
     ctx.ellipse(d.x, d.y, 24.0 * shk, 10.0 * shk, 0.0, 0.0, std::f64::consts::TAU);
     ctx.fill();
 
-    let bronze = 0x8a5c22;
+    let body = 0x27c46f; // emerald
+    let wing = 0xd94fc0; // magenta
+    let tailc = 0x3f7fe8; // sapphire
+    let headc = 0xff7a2e; // fiery orange
     let k = (300.0 / (150.0 + d.z)).clamp(0.35, 1.15);
     let flap = 0.5 + 0.5 * d.flap.sin(); // 0..1 wing cycle
     let ext = (0.35 + 0.65 * flap) * 22.0 * k;
@@ -877,7 +982,7 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
     ctx.translate(d.x, d.y);
     ctx.rotate(d.heading);
     // Tail, swept back.
-    ctx.set_fill_style_str(&shade(bronze, 0.78));
+    ctx.set_fill_style_str(&shade(tailc, 0.85));
     ctx.begin_path();
     ctx.move_to(-10.0 * k, -2.0 * k);
     ctx.quadratic_curve_to(-20.0 * k, 0.0, -30.0 * k, 1.5 * k);
@@ -886,7 +991,7 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
     ctx.fill();
     // Wings, sweeping with the beat.
     for sy in [-1.0, 1.0] {
-        ctx.set_fill_style_str(&shade(bronze, 0.92));
+        ctx.set_fill_style_str(&shade(wing, 0.92));
         ctx.begin_path();
         ctx.move_to(4.0 * k, sy * 1.5 * k);
         ctx.quadratic_curve_to(-2.0 * k, sy * ext * 0.75, -8.0 * k, sy * ext);
@@ -894,7 +999,7 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
         ctx.close_path();
         ctx.fill();
         // Sunlit leading edge.
-        ctx.set_fill_style_str(&shade(bronze, 1.15));
+        ctx.set_fill_style_str(&shade(wing, 1.18));
         ctx.begin_path();
         ctx.move_to(4.0 * k, sy * 1.5 * k);
         ctx.quadratic_curve_to(-1.0 * k, sy * ext * 0.7, -8.0 * k, sy * ext);
@@ -903,10 +1008,16 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
         ctx.fill();
     }
     // Body + head + neck.
-    ctx.set_fill_style_str(&rgb(bronze));
+    ctx.set_fill_style_str(&rgb(body));
     ctx.begin_path();
     ctx.ellipse(-1.0 * k, 0.0, 12.0 * k, 4.5 * k, 0.0, 0.0, std::f64::consts::TAU);
     ctx.fill();
+    ctx.set_fill_style_str(&shade(body, 1.25));
+    ctx.begin_path();
+    ctx.ellipse(-1.5 * k, 0.0, 9.0 * k, 2.2 * k, 0.0, 0.0, std::f64::consts::TAU);
+    ctx.fill();
+    // Fiery head.
+    ctx.set_fill_style_str(&rgb(headc));
     ctx.begin_path();
     ctx.ellipse(11.0 * k, 0.0, 5.0 * k, 3.0 * k, 0.0, 0.0, std::f64::consts::TAU);
     ctx.fill();
@@ -914,7 +1025,7 @@ fn draw_dragon(ctx: &CanvasRenderingContext2d, d: &crate::wildlife::Dragon) {
     ctx.arc(15.5 * k, 0.0, 2.2 * k, 0.0, std::f64::consts::TAU);
     ctx.fill();
     // Horn glint.
-    ctx.set_fill_style_str(&shade(bronze, 1.5));
+    ctx.set_fill_style_str(&shade(headc, 1.5));
     ctx.begin_path();
     ctx.arc(15.5 * k, 0.0, 0.8 * k, 0.0, std::f64::consts::TAU);
     ctx.fill();
@@ -1022,6 +1133,12 @@ fn draw_fx(ctx: &CanvasRenderingContext2d, fx: &crate::fx::Fx, view: &View) {
                 ctx.set_fill_style_str(&rgba(p.color, a));
                 ctx.fill_rect(px - p.size * 0.5, py - p.size * 0.5, p.size, p.size);
             }
+            crate::fx::PKind::Water => {
+                ctx.set_fill_style_str(&rgba(p.color, a));
+                ctx.begin_path();
+                ctx.arc(px, py, p.size * 0.6, 0.0, std::f64::consts::TAU);
+                ctx.fill();
+            }
         }
     }
 }
@@ -1070,6 +1187,11 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
         }
     }
 
+    // Specials panel (top-right, below the stars): always shows which
+    // special actions are available right now and their keys.
+    draw_specials(ctx, s, w);
+
+
     // Auto-land status (bottom-left, above the altitude box).
     if !s.on_foot && s.in_plane && s.landing {
         let (tx, ty) = s.landing_target;
@@ -1109,7 +1231,7 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     if s.riding.is_some() {
         ctx.set_fill_style_str("rgba(255,255,255,0.7)");
         ctx.set_font(FONT);
-        ctx.fill_text("ON AN ELEPHANT — Z: jump off", 16.0, h - 24.0);
+        ctx.fill_text("ON AN ELEPHANT — E: jump off", 16.0, h - 24.0);
     } else if !s.on_foot {
         let spd = if s.in_dragon { s.wildlife.dragon.speed } else { s.active_vehicle().speed() };
         let kmh = (spd * 0.18).round() as u32;
@@ -1128,7 +1250,7 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     } else {
         ctx.set_fill_style_str("rgba(255,255,255,0.7)");
         ctx.set_font(FONT);
-        ctx.fill_text("ON FOOT — E: enter vehicle · F: plane · D: dragon", 16.0, h - 24.0);
+        ctx.fill_text("ON FOOT — SPECIALS, top right", 16.0, h - 24.0);
     }
 
     // Mission timer.
@@ -1169,6 +1291,44 @@ pub fn draw_hud(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
     }
 
     draw_minimap(ctx, s, w, h);
+}
+
+/// Always-on top-right panel: which special actions are available right now
+/// and which key fires them (from `GameState::special_actions`).
+fn draw_specials(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64) {
+    let acts = s.special_actions();
+    if acts.is_empty() || w < 700.0 {
+        return;
+    }
+    let pw = 252.0;
+    let row_h = 19.0;
+    let ph = 34.0 + acts.len() as f64 * row_h;
+    let x0 = w - pw - 14.0;
+    let y0 = 54.0;
+    ctx.set_fill_style_str("rgba(0,0,0,0.5)");
+    fill_round(ctx, x0, y0, pw, ph, 10.0);
+    ctx.set_stroke_style_str("rgba(255,214,10,0.45)");
+    ctx.set_line_width(1.5);
+    ctx.begin_path();
+    let _ = ctx.round_rect_with_f64(x0, y0, pw, ph, 10.0);
+    let _ = ctx.stroke();
+    ctx.set_fill_style_str("rgba(255,214,10,0.95)");
+    ctx.set_font("bold 12px 'Segoe UI', system-ui, sans-serif");
+    ctx.set_text_align("left");
+    ctx.fill_text("SPECIALS", x0 + 12.0, y0 + 19.0);
+    ctx.set_font("13px 'Segoe UI', system-ui, sans-serif");
+    let mut y = y0 + 40.0;
+    for a in &acts {
+        // Key badge (gold) + label (white).
+        ctx.set_fill_style_str("rgba(255,255,255,0.16)");
+        let kw = a.key.len() as f64 * 8.0 + 10.0;
+        fill_round(ctx, x0 + 10.0, y - 13.0, kw, 17.0, 4.0);
+        ctx.set_fill_style_str("#ffd60a");
+        ctx.fill_text(a.key, x0 + 15.0, y);
+        ctx.set_fill_style_str("rgba(255,255,255,0.92)");
+        ctx.fill_text(a.label, x0 + 10.0 + kw + 8.0, y);
+        y += row_h;
+    }
 }
 
 fn draw_star(ctx: &CanvasRenderingContext2d, cx: f64, cy: f64, r: f64, color: &str) {

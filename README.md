@@ -53,6 +53,12 @@ The crate (`src/`) is split into two halves:
 A small deterministic RNG (`xorshift64*`, in `lib.rs`) makes the generated
 city and the tests reproducible.
 
+The HUD is shared by both renderers: money, wanted stars, mission line,
+minimap and the always-on **SPECIALS** panel (top-right) that lists every
+special action currently available with its key (board/exit **E**, summon
+airplane **F**, summon dragon **G**, auto-land **M**, view **V**/camera
+**C**, pause **P**, recenter **R**).
+
 The web shell is minimal: `web/index.html` loads the wasm-bindgen output in
 `web/pkg/` (`gt6.js` + `gt6_bg.wasm`) and calls `init()`.
 
@@ -78,6 +84,28 @@ python3 -m http.server 8090
 
 ### Controls
 
+Every special usage has its own dedicated key that never overlaps the
+movement keys (WASD / arrows / Shift / Space), and the **SPECIALS panel in
+the top-right corner always shows which special actions are available right
+now and how to use them** — it updates with your situation (on foot, in the
+car, in the plane, on the elephant, on the dragon).
+
+- **E** — board / exit: enter the nearest rideable thing in reach (car,
+  airplane, elephant) or get off the one you're on (car, airplane, elephant,
+  dragon). Vehicles must be (nearly) stopped first.
+- **F** — summon the airplane to you and take the controls (works from
+  anywhere).
+- **G** — summon the dragon to you and take the reins (works from anywhere;
+  snaps you into the 3D view).
+- **M** — auto-land (airplane only): autopilot flies to the nearest clear
+  intersection; press again to cancel.
+- **V** — toggle top-down / 3D chase-cam view
+- **C** (3D mode) — reset the camera back to the chase position
+- **P** — pause
+- **R** — recenter camera on player (top-down)
+- **Mouse drag** — 3D mode: orbit/tilt the camera; in the plane/dragon:
+  steer it (horizontal = yaw, vertical = pitch)
+
 In a car:
 
 - **W / ↑** — accelerate
@@ -89,9 +117,6 @@ In a car:
 
 In the airplane (keyboard and mouse both work; keyboard wins when held):
 
-- **F** — summon the plane to you and take the controls (works from
-  anywhere, on foot or in the car). The plane drops in at your position
-  facing your heading and eases up off the street.
 - **W / ↑** — throttle
 - **S / ↓** — brake / slow
 - **A / D, ← / →** — yaw
@@ -111,35 +136,23 @@ In the airplane (keyboard and mouse both work; keyboard wins when held):
 
 Riding the dragon (keyboard and mouse both work; keyboard wins when held):
 
-- **D** — take the dragon's reins / release it. Because `D` is already a
-  movement key (steer, walk), it only summons the dragon where it is free:
-  from a (nearly) stopped car, from an elephant you're riding, or while
-  already on the dragon (to get off). Riding it snaps you into the 3D view.
 - **W / ↑** — speed up (throttle) · **S / ↓** — slow down / brake
 - **A / D, ← / →, or mouse drag** — turn (the dragon banks into its turns)
 - **Shift** — climb · **Space** — dive
 - **Left mouse (hold)** — full throttle · **Right mouse (hold)** — full brake
 - **Mouse wheel** — set cruise throttle (shown as THR % in the HUD)
-- **D** — release: you drop to the street below, on foot, and the dragon
+- **Left mouse** — also breathe **fireballs** (LMB; holding streams them)
+- **E** — exit: you drop to the street below, on foot, and the dragon
   resumes circling the city on its own from the altitude you left it at.
 
 On foot:
 
 - **WASD / arrows** — walk
 - **Shift** — run
-- **E** — enter the nearby vehicle (your car, or the airplane)
-- **Z** (next to an elephant) — **ride the elephant**. It wanders the
-  streets on its own and carries you along on its back. Press **Z** again
-  to jump off and be dropped back to the street as a pedestrian.
-
-General:
-
-- **P** — pause
-- **R** — recenter camera on player (top-down)
-- **V** — toggle top-down / 3D chase-cam view
-- **Mouse drag** (3D mode) — orbit the camera around the player
-  (horizontal) and tilt it up/down (vertical)
-- **C** (3D mode) — reset the camera back to the chase position
+- **E** — board the nearest rideable thing in reach: your car, the
+  airplane, or an **elephant** (it wanders the streets on its own and
+  carries you along on its back; **E** again jumps you off back to the
+  pavement as a pedestrian)
 
 ### 3D mode
 
@@ -194,12 +207,12 @@ renderer then transforms and depth-sorts the whole mesh every frame behind
 the buildings, with the same backface culling, sun lighting and distance
 fog as everything else; far away it falls back to a cheap silhouette so the
 software rasterizer never drowns in distant triangles. In the top-down view
-it's a small flapping shadow-caster. Press **D** to take its reins and fly
-it yourself (W/S speed, A/D or drag to turn, Shift/Space to climb and dive)
-— a smooth, banked, wing-flapping pursuit over the rooftops — then press **D**
-again to drop back to the street and let it resume its rounds. Its flight
-loop runs on a private RNG so the rest of the deterministic world is
-unaffected.
+it's a small flapping shadow-caster. Press **G** anywhere to summon it to
+you and take its reins (W/S speed, A/D or drag to turn, Shift/Space to
+climb and dive, LMB to breathe fireballs) — a smooth, banked,
+wing-flapping pursuit over the rooftops — then press **E** to drop back to
+the street and let it resume its rounds. Its flight loop runs on a private
+RNG so the rest of the deterministic world is unaffected.
 
 ### Visual FX & particles
 
@@ -218,8 +231,8 @@ expanding radar ring (3D). A subtle vignette frames both views.
   chase. Getting caught triggers a **BUSTED** screen and costs you money.
 - Watch out for the **elephants** on the streets: they freeze when a fast car
   comes near, and they're solid — a fast hit raises your wanted level. Or just
-  walk up to one and press `Z` to **ride it** — the elephant amblers down the
-  streets on its own (with the whole herd, at a very relaxed pace), and `Z`
+  walk up to one and press `E` to **board it** — the elephant amblers down the
+  streets on its own (with the whole herd, at a very relaxed pace), and `E`
   again drops you back to the pavement as a pedestrian. Pigeons, gulls and
   hawks circle overhead; press `V` and look up.
 - Start with $100; mission payouts add to it.

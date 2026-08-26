@@ -17,6 +17,8 @@ pub enum PKind {
     Glitter,
     /// Small hard chunk with gravity + bounce: debris from hard impacts.
     Debris,
+    /// Arcing blue droplet thrown at a blaze by a citizen with water.
+    Water,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -212,6 +214,29 @@ impl Fx {
                 kind: PKind::Glitter,
             });
         }
+    }
+
+    /// A droplet of water hurled at a fire: arcs on a ballistic path and
+    /// puffs into mist where it lands.
+    pub fn water(&mut self, rng: &mut Rng, x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64) {
+        let life = rng.range(0.35, 0.7);
+        self.push(Particle {
+            x,
+            y,
+            z,
+            vx,
+            vy,
+            vz,
+            life,
+            ttl: life,
+            size: rng.range(1.5, 2.6),
+            grow: 2.0,
+            color: 0x6cc4ff,
+            alpha: 0.85,
+            grav: 240.0,
+            drag: 0.35,
+            kind: PKind::Water,
+        });
     }
 
     /// Small hard chunks that bounce off the street (car crashes).
