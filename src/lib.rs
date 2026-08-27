@@ -7,6 +7,7 @@
 pub mod cam3d;
 pub mod car;
 pub mod city;
+pub mod config;
 pub mod fx;
 pub mod glb;
 pub mod input;

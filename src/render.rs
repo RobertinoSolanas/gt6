@@ -153,6 +153,107 @@ pub fn draw_overlays(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f
         ctx.set_text_align("center");
         ctx.fill_text("PAUSED — P TO RESUME", w / 2.0, h / 2.0);
     }
+    if s.config_open {
+        draw_config_page(ctx, s, w, h);
+    }
+}
+
+/// The in-game config page (ESC): rebind every movement key, mouse button
+/// and special action, and tune the mouse sensitivity. ENTER saves the
+/// bindings to `config.ini`, L loads it back, X restores the defaults.
+fn draw_config_page(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64, h: f64) {
+    let rows = s.config_rows();
+    let pw = f64::min(620.0, w - 20.0);
+    let header_h = 34.0;
+    let section_h = 20.0;
+    let footer_h = 60.0;
+    let n_sections = rows.iter().filter(|r| r.section.is_some()).count();
+    // Shrink the rows if the panel would not fit on a short screen.
+    let mut row_h = 19.0;
+    let fixed = header_h + n_sections as f64 * section_h + footer_h;
+    if fixed + rows.len() as f64 * row_h > h - 20.0 {
+        row_h = ((h - 20.0) - fixed) / rows.len() as f64;
+    }
+    let ph = fixed + rows.len() as f64 * row_h;
+    let x0 = (w - pw) / 2.0;
+    let y0 = (h - ph).max(10.0) / 2.0;
+
+    // Dim the world behind the panel.
+    ctx.set_fill_style_str("rgba(0,0,0,0.55)");
+    ctx.fill_rect(0.0, 0.0, w, h);
+
+    // Panel.
+    ctx.set_fill_style_str("rgba(12,14,20,0.96)");
+    fill_round(ctx, x0, y0, pw, ph, 12.0);
+    ctx.set_stroke_style_str("rgba(255,214,10,0.6)");
+    ctx.set_line_width(2.0);
+    ctx.begin_path();
+    let _ = ctx.round_rect_with_f64(x0, y0, pw, ph, 12.0);
+    let _ = ctx.stroke();
+
+    // Title.
+    ctx.set_fill_style_str("#ffd60a");
+    ctx.set_font("bold 17px 'Segoe UI', system-ui, sans-serif");
+    ctx.set_text_align("left");
+    ctx.fill_text("CONFIG", x0 + 16.0, y0 + 23.0);
+    ctx.set_fill_style_str("rgba(255,255,255,0.55)");
+    ctx.set_font("12px 'Segoe UI', system-ui, sans-serif");
+    ctx.fill_text(
+        "key bindings & mouse behavior — saved to config.ini",
+        x0 + 104.0,
+        y0 + 23.0,
+    );
+
+    let mut y = y0 + header_h;
+    let sel = s.config_sel;
+    for (i, row) in rows.iter().enumerate() {
+        if let Some(section) = row.section {
+            ctx.set_fill_style_str("rgba(255,214,10,0.85)");
+            ctx.set_font("bold 11px 'Segoe UI', system-ui, sans-serif");
+            ctx.fill_text(section, x0 + 16.0, y + 13.0);
+            y += section_h;
+        }
+        let ry = y + row_h;
+        if i == sel {
+            ctx.set_fill_style_str("rgba(255,214,10,0.18)");
+            fill_round(ctx, x0 + 10.0, y, pw - 20.0, row_h, 5.0);
+        }
+        ctx.set_font("13px 'Segoe UI', system-ui, sans-serif");
+        ctx.set_fill_style_str(if i == sel { "#ffffff" } else { "rgba(255,255,255,0.75)" });
+        ctx.set_text_align("left");
+        ctx.fill_text(row.label, x0 + 22.0, ry);
+        // Value badge (right-aligned): key, mouse button or slider value.
+        ctx.set_fill_style_str("rgba(255,255,255,0.14)");
+        let bw = row.value.len() as f64 * 8.0 + 16.0;
+        fill_round(ctx, x0 + pw - bw - 18.0, y + 1.0, bw, row_h - 2.0, 4.0);
+        ctx.set_fill_style_str(if i == sel { "#ffd60a" } else { "#9ad1ff" });
+        ctx.set_text_align("center");
+        ctx.fill_text(&row.value, x0 + pw - bw / 2.0 - 18.0, ry);
+        y += row_h;
+    }
+
+    // Footer: how to use the page.
+    let fy = y0 + ph - footer_h;
+    ctx.set_stroke_style_str("rgba(255,255,255,0.2)");
+    ctx.set_line_width(1.0);
+    ctx.begin_path();
+    ctx.move_to(x0 + 14.0, fy + 3.0);
+    ctx.line_to(x0 + pw - 14.0, fy + 3.0);
+    ctx.stroke();
+    ctx.set_font("12px 'Segoe UI', system-ui, sans-serif");
+    ctx.set_text_align("left");
+    ctx.set_fill_style_str("rgba(255,255,255,0.75)");
+    ctx.fill_text(
+        "\u{2191}/\u{2193} select · press a key to bind · \u{2190}/\u{2192} adjust slider / cycle mouse button",
+        x0 + 16.0,
+        fy + 22.0,
+    );
+    ctx.set_fill_style_str("#ffd60a");
+    ctx.fill_text(
+        "ENTER: save to config.ini · L: load config.ini · X: defaults · ESC: close",
+        x0 + 16.0,
+        fy + 42.0,
+    );
 }
 
 fn draw_roads(ctx: &CanvasRenderingContext2d, s: &GameState, view: &View) {
@@ -1321,10 +1422,10 @@ fn draw_specials(ctx: &CanvasRenderingContext2d, s: &GameState, w: f64) {
     for a in &acts {
         // Key badge (gold) + label (white).
         ctx.set_fill_style_str("rgba(255,255,255,0.16)");
-        let kw = a.key.len() as f64 * 8.0 + 10.0;
+        let kw = (a.key.len().max(1) as f64) * 8.0 + 10.0;
         fill_round(ctx, x0 + 10.0, y - 13.0, kw, 17.0, 4.0);
         ctx.set_fill_style_str("#ffd60a");
-        ctx.fill_text(a.key, x0 + 15.0, y);
+        ctx.fill_text(&a.key, x0 + 15.0, y);
         ctx.set_fill_style_str("rgba(255,255,255,0.92)");
         ctx.fill_text(a.label, x0 + 10.0 + kw + 8.0, y);
         y += row_h;

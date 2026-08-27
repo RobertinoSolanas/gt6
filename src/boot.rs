@@ -1,5 +1,7 @@
 //! WASM entry point: wires DOM (canvas, keyboard, rAF) to the game loop.
 
+#![allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -8,6 +10,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, KeyboardEvent, MouseEvent};
 
 use crate::audio::Audio;
+use crate::config::Config;
 use crate::input::Input;
 use crate::state::{step, Event, GameState};
 
@@ -61,7 +64,13 @@ pub fn start() {
         let cb = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
             let k = e.key().to_string();
             let kl = k.to_ascii_lowercase();
-            if Input::KEYS.contains(&kl.as_str()) {
+            // Suppress the browser defaults for every currently bound key
+            // (the bindings can change in the config page, so ask the live
+            // config every time).
+            let bound = unsafe { STATE.as_ref() }
+                .map(|s| Input::prevent_keys(&s.borrow().config))
+                .unwrap_or_else(|| Input::prevent_keys(&Config::default()));
+            if bound.contains(&kl) {
                 e.prevent_default();
                 ra.borrow_mut().unlock();
             }
@@ -98,6 +107,11 @@ pub fn start() {
                     ra.borrow_mut().unlock();
                     ri.borrow_mut().mouse_down();
                 }
+                1 => {
+                    e.prevent_default();
+                    ra.borrow_mut().unlock();
+                    ri.borrow_mut().mouse_middle_down();
+                }
                 2 => {
                     e.prevent_default();
                     ra.borrow_mut().unlock();
@@ -123,6 +137,7 @@ pub fn start() {
         let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |e: MouseEvent| {
             match e.button() {
                 0 => ri.borrow_mut().mouse_up(),
+                1 => ri.borrow_mut().mouse_middle_up(),
                 2 => ri.borrow_mut().mouse_right_up(),
                 _ => {}
             }
@@ -156,6 +171,13 @@ pub fn start() {
     {
         let st = state.clone();
         load_dragon_glb(&window, st);
+    }
+
+    // --- Player config: config.ini from the page directory (or the
+    //     localStorage copy saved by the config page) ---
+    {
+        let st = state.clone();
+        load_config_ini(window.clone(), st, false);
     }
 
     // --- Main loop (rAF) ---
@@ -195,6 +217,15 @@ pub fn start() {
                 Event::Busted => a.busted(),
                 Event::Fireball => a.fireball(),
                 Event::BuildingDown => a.boom(),
+                Event::ConfigSave => {
+                    let ini = state.borrow().config.to_ini();
+                    if let Some(doc) = w2.document() {
+                        save_config_ini(&w2, &doc, &ini);
+                    }
+                }
+                Event::ConfigLoad => {
+                    load_config_ini(w2.clone(), state.clone(), true);
+                }
                 _ => {}
             }
         }
@@ -472,6 +503,126 @@ pub fn debug_wildlife() -> Array {
         }
     }
     a
+}
+
+/// The `config.ini` the player config is saved to / loaded from (it is also
+/// kept in `localStorage` so the browser can't lose it between downloads).
+const CONFIG_FILE: &str = "config.ini";
+const CONFIG_LS_KEY: &str = "gt6-config";
+
+/// Fetch `config.ini` from the page directory and apply it to the game
+/// state. When it is missing, the `localStorage` copy is used instead (so a
+/// config saved from the config page keeps working). `announce` shows a HUD
+/// message (used by the in-page "L: load" action; silent at boot).
+fn load_config_ini(window: web_sys::Window, state: Rc<RefCell<GameState>>, announce: bool) {
+    let promise = window.fetch_with_str(CONFIG_FILE);
+    let st = state.clone();
+    let w1 = window.clone();
+    let on_response = call_once(move |resp: JsValue| {
+        let resp: Result<web_sys::Response, JsValue> = resp.dyn_into();
+        // A 404 (no config.ini next to index.html) still resolves — only a
+        // real 200 response is config.
+        let text_promise = match resp {
+            Ok(r) if r.ok() => r.text().expect("response text"),
+            Ok(_) | Err(_) => {
+                config_ini_missing(&w1, st.clone(), announce);
+                return;
+            }
+        };
+        let on_text = Closure::<dyn FnMut(JsValue)>::new(move |t: JsValue| {
+            let text = t.as_string().unwrap_or_default();
+            let ok = st.borrow_mut().apply_config_text(&text);
+            if ok {
+                log_info(&format!("{} loaded", CONFIG_FILE));
+                if announce {
+                    st.borrow_mut().set_msg("CONFIG LOADED FROM config.ini", 2.5);
+                }
+            } else {
+                log_err(&format!("{} could not be parsed", CONFIG_FILE));
+            }
+        });
+        let _ = text_promise.then(&on_text);
+        on_text.forget();
+    });
+    let st2 = state.clone();
+    let on_reject = call_once(move |_e: JsValue| config_ini_missing(&window, st2, announce));
+    let _ = promise.then(&on_response);
+    let _ = promise.catch(&on_reject);
+    on_response.forget();
+    on_reject.forget();
+}
+
+/// No `config.ini` on the server: fall back to the localStorage copy.
+fn config_ini_missing(window: &web_sys::Window, state: Rc<RefCell<GameState>>, announce: bool) {
+    if let Ok(Some(ls)) = window.local_storage() {
+        if let Ok(Some(saved)) = ls.get_item(CONFIG_LS_KEY) {
+            state.borrow_mut().apply_config_text(&saved);
+            if announce {
+                state.borrow_mut().set_msg("CONFIG LOADED (BROWSER COPY)", 2.5);
+            }
+            return;
+        }
+    }
+    if announce {
+        state
+            .borrow_mut()
+            .set_msg("config.ini NOT FOUND — DEFAULTS IN USE", 2.5);
+    }
+}
+
+/// Save the config as `config.ini`: a browser download (the file the game
+/// loads on boot) plus a `localStorage` backup.
+fn save_config_ini(window: &web_sys::Window, document: &web_sys::Document, ini: &str) {
+    if let Ok(Some(ls)) = window.local_storage() {
+        let _ = ls.set_item(CONFIG_LS_KEY, ini);
+    }
+    let seq = js_sys::Array::new();
+    seq.push(&JsValue::from_str(ini));
+    let opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("text/plain;charset=utf-8");
+    if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&seq, &opts) {
+        if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+            if let Ok(el) = document.create_element("a") {
+                if let Ok(a) = el.dyn_into::<web_sys::HtmlAnchorElement>() {
+                    a.set_href(&url);
+                    a.set_download(CONFIG_FILE);
+                    if let Some(body) = document.body() {
+                        let _ = body.append_child(&a);
+                        a.click();
+                        let _ = a.remove();
+                    }
+                }
+            }
+            let _ = web_sys::Url::revoke_object_url(&url);
+        }
+    }
+    log_info(&format!("{} saved (download started)", CONFIG_FILE));
+}
+
+/// Debug/test: the current config as `config.ini` text.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_config_ini() -> String {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| s.borrow().config.to_ini()) }
+        .unwrap_or_default()
+}
+
+/// Debug/test: `1` while the config page is open, `0` otherwise.
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_config_open() -> f32 {
+    // SAFETY: single-threaded wasm game loop.
+    unsafe { STATE.as_ref().map(|s| if s.borrow().config_open { 1.0 } else { 0.0 }) }
+        .unwrap_or(0.0)
+}
+
+/// Debug/test: apply `config.ini` text to the live config (browser tests).
+#[wasm_bindgen]
+#[allow(static_mut_refs)] // single-threaded wasm: STATE is only written once in start()
+pub fn debug_config_apply(text: &str) -> bool {
+    let state = unsafe { STATE.as_ref().cloned() };
+    state.map(|s| s.borrow_mut().apply_config_text(text)).unwrap_or(false)
 }
 
 /// Debug/test: `[player_x, player_y, on_foot, money, stars]`.

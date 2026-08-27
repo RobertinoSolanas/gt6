@@ -22,6 +22,10 @@ The crate (`src/`) is split into two halves:
   - `traffic.rs` — AI traffic
   - `police.rs` — police / wanted-level logic
   - `mission.rs` — timed fetch-and-deliver missions (yellow = pickup, green = delivery)
+  - `config.rs` — player key bindings & mouse behavior: rebindable movement
+    keys, mouse buttons (throttle / brake / fireball / walk-forward), mouse
+    sensitivity and every special action, with a `config.ini` (INI) reader/
+    writer
   - `wildlife.rs` — elephants (herd wander, startle-and-freeze, diagonal
     walk gait), birds (flap/glide flight, meandering sky paths) and the
     dragon (high-altitude banked meanders, plus a player-controlled flight
@@ -109,8 +113,12 @@ car, in the plane, on the elephant, on the dragon).
   Press **F1** again to leave auto mode entirely (full manual).
 - **V** — toggle top-down / 3D chase-cam view
 - **C** (3D mode) — reset the camera back to the chase position
-- **P** — pause
+- **P** — pause / resume
 - **R** — recenter camera on player (top-down)
+- **ESC** — open the **config page**: rebind every movement key, mouse
+  button and special action, and tune the mouse sensitivity. The world
+  freezes while it is open. **ENTER** saves the bindings to `config.ini`,
+  **L** loads `config.ini` back, **X** restores the defaults.
 - **Mouse drag** — 3D mode: orbit/tilt the camera; in the plane/dragon:
   steer it (horizontal = yaw, vertical = pitch)
 
@@ -169,6 +177,62 @@ controls, and snaps back to obeying you the instant you press a key — so
 you can cruise the streets hands-free, loiter at altitude in the plane,
 steer an elephant for a block and then let it wander, or ride the dragon
 while it loops the sky. The **SPECIALS** panel shows the current F1 state.
+
+### Config page & `config.ini` (ESC)
+
+Press **ESC** any time to open the config page: a full-screen list of every
+binding, grouped into **MOVEMENT** (forward / back / steer / run·boost·climb
+/ handbrake·dive), **MOUSE** (which button is full-throttle, brake,
+dragon fireball and walk-forward, plus a sensitivity slider) and **SPECIAL
+ACTIONS** (board/exit, summon airplane, summon dragon, auto-land, auto
+mode, view, reset camera, pause, recenter, and the config-page key itself).
+
+- **↑/↓** select a row, then **press any key** to bind it (a key can only
+  live on one row — binding it steals it from the other; the config-page
+  key can never be stolen so the page always stays openable).
+- **←/→** steps the mouse-sensitivity slider or cycles a mouse-button row
+  (LMB → MMB → RMB).
+- **ENTER** saves the current config as **`config.ini`** (the browser
+  downloads the file; a copy is also kept in `localStorage` so it survives
+  even if the download is discarded).
+- **L** loads `config.ini` again — it is fetched from the page directory
+  (drop the file next to `index.html` and it is picked up on every boot),
+  falling back to the `localStorage` copy.
+- **X** restores the factory defaults.
+
+The format is a plain INI file you can also edit by hand:
+
+```ini
+[movement]
+forward = w
+back = s
+steer_left = a
+steer_right = d
+boost_climb = shift
+handbrake_dive = space
+
+[mouse]
+throttle_button = lmb
+brake_button = rmb
+fireball_button = lmb
+walk_button = rmb
+sensitivity = 1.00
+
+[specials]
+enter_exit = e
+summon_airplane = f
+summon_dragon = g
+auto_land = m
+auto_mode = f1
+view = v
+reset_camera = c
+pause = p
+recenter = r
+config_page = escape
+```
+
+The arrow keys always work as a second movement set no matter what the
+primary keys are bound to.
 
 ### 3D mode
 
@@ -272,8 +336,8 @@ expanding radar ring (3D). A subtle vignette frames both views.
 cargo test
 ```
 
-Runs the pure-logic test suites (`car`, `city`, `fx`, `input`, `mission`,
-`police`, `state`) natively — no browser needed.
+Runs the pure-logic test suites (`car`, `city`, `config`, `fx`, `input`,
+`mission`, `police`, `state`) natively — no browser needed.
 
 ### Browser smoke test
 
@@ -304,6 +368,12 @@ with **D**, climbs and accelerates with the keyboard, banks a turn with a
 mouse drag, screenshots the 3D chase cam (`/tmp/gt6_dragon_fly.png`), then
 releases it back to the street.
 
+`node tools/config-test.js` exercises the config page: opens it with **ESC**,
+checks the world freezes, rebinds the dragon-summon key to **T** (and flies
+it), verifies **ENTER** downloads a correct `config.ini`, then applies a
+hand-written `config.ini` (new WASD, new mouse buttons, new summon keys) and
+proves the game obeys it.
+
 ## Project layout
 
 ```
@@ -311,10 +381,12 @@ Cargo.toml            crate config (rlib for tests + cdylib for wasm)
 src/                  game code (see Architecture)
 web/index.html        one-page host
 web/assets/dragon.glb the dragon 3D model (GLB, Khronos sample)
+web/config.ini        player key bindings (optional; created by the config page)
 web/pkg/              wasm-bindgen output (generated, do not edit)
 tools/browser-test.js headless-browser smoke test
 tools/dragon-test.js  headless GLB/dragon smoke test
 tools/dragon-fly-test.js  headless dragon-control smoke test
+tools/config-test.js  headless config-page / config.ini smoke test
 ```
 
 ## License

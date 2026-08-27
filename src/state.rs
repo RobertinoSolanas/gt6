@@ -4,6 +4,7 @@
 use crate::Rng;
 use crate::car::{Car, CarKind, collide_car_with_city, step_car, step_plane};
 use crate::city::City;
+use crate::config::{key_display, Binding, Config};
 use crate::fx::Fx;
 use crate::input::Input;
 use crate::mission::{Mission, MissionEvent};
@@ -53,10 +54,21 @@ pub enum BoardTarget {
 
 /// One row of the top-right "SPECIALS" HUD panel: a key and what it does in
 /// the current situation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpecialAction {
-    pub key: &'static str,
+    pub key: String,
     pub label: &'static str,
+}
+
+/// One row of the in-game config page (ESC).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigRow {
+    /// Section header drawn above the first row of the section (else `None`).
+    pub section: Option<&'static str>,
+    pub label: &'static str,
+    /// The current value, formatted for display (e.g. "W", "SPACE", "LMB",
+    /// "1.00x").
+    pub value: String,
 }
 
 /// Stable id for the `lot`-th building slot of block `block` (j * N + i).
@@ -115,6 +127,14 @@ pub struct GameState {
     // Wanted
     pub heat: f64,
     pub last_crime: f64,
+
+    // Player config (key bindings + mouse behavior, ESC opens the page,
+    // saved to / loaded from config.ini).
+    pub config: Config,
+    /// The config page is open (the world freezes while it is).
+    pub config_open: bool,
+    /// Selected row in the config page.
+    pub config_sel: usize,
 
     // Meta
     pub money: u32,
@@ -179,9 +199,73 @@ pub enum Event {
     ExitCar,
     Fireball,
     BuildingDown,
+    /// Save the current config to `config.ini` (DOM side effect).
+    ConfigSave,
+    /// Load the config from `config.ini` (DOM side effect).
+    ConfigLoad,
 }
 
 impl GameState {
+    pub fn new_with_config(seed: u64, config: Config) -> Self {
+        let mut s = Self::new(seed);
+        s.config = config;
+        s
+    }
+
+    /// Replace the key bindings / mouse behavior from `config.ini` text.
+    /// Returns `true` if the text parsed (it always does — unknown lines are
+    /// ignored and missing values keep the current defaults' values).
+    pub fn apply_config_text(&mut self, text: &str) -> bool {
+        self.config = Config::from_ini(text);
+        self.config_sel = 0;
+        true
+    }
+
+    /// The rows shown in the config page (ESC), in order.
+    pub fn config_rows(&self) -> Vec<ConfigRow> {
+        let c = &self.config;
+        let key = |b: Binding| {
+            c.key(b)
+                .map(|k| if k.is_empty() { "—".to_string() } else { key_display(k) })
+                .unwrap_or_default()
+        };
+        let mut rows = Vec::new();
+        for b in Binding::ALL {
+            let value = match b {
+                Binding::Sensitivity => format!("{:.2}x", c.mouse_sensitivity),
+                _ => match c.mouse_button(b) {
+                    Some(m) => m.display().to_string(),
+                    None => key(b),
+                },
+            };
+            rows.push(ConfigRow {
+                section: b.section(),
+                label: b.label(),
+                value,
+            });
+        }
+        rows
+    }
+
+    /// Bind a key to a keyboard row of the config page (no-op on mouse
+    /// rows — those cycle with ←/→).
+    fn config_bind_key(&mut self, b: Binding, k: &str) {
+        if self.config.key(b).is_some() {
+            self.config.set_key(b, k.to_string());
+        }
+    }
+
+    /// Step the selected config row one notch: the mouse-sensitivity slider
+    /// or a mouse-button row (←/→ on the config page).
+    fn config_adjust(&mut self, b: Binding, dir: i32) {
+        match b {
+            Binding::Sensitivity => {
+                self.config.set_sensitivity(self.config.mouse_sensitivity + 0.25 * dir as f64)
+            }
+            _ => self.config.cycle_mouse_button(b, dir),
+        }
+    }
+
     pub fn new(seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let city = City::new(seed);
@@ -212,6 +296,9 @@ impl GameState {
             in_plane: false,
             in_dragon: false,
             on_foot: false,
+            config: Config::default(),
+            config_open: false,
+            config_sel: 0,
             foot_x: sx,
             foot_y: sy,
             foot_heading: 0.0,
@@ -357,61 +444,79 @@ impl GameState {
     /// The special actions available right now, with their keys — drawn as
     /// the always-on "SPECIALS" panel in the top-right corner of the HUD.
     pub fn special_actions(&self) -> Vec<SpecialAction> {
+        let c = &self.config;
+        let k = |b: Binding| key_display(c.key(b).map_or("", |v| v));
         let mut a = Vec::new();
-        // E — board / exit the nearest rideable thing.
+        // Board / exit the nearest rideable thing.
         if self.in_dragon {
-            a.push(SpecialAction { key: "E", label: "EXIT DRAGON (DROP DOWN)" });
-            a.push(SpecialAction { key: "LMB", label: "FIREBALL" });
+            a.push(SpecialAction { key: k(Binding::EnterExit), label: "EXIT DRAGON (DROP DOWN)" });
+            a.push(SpecialAction { key: c.fireball_button.display().to_string(), label: "FIREBALL" });
         } else if self.riding.is_some() {
-            a.push(SpecialAction { key: "E", label: "JUMP OFF ELEPHANT" });
+            a.push(SpecialAction { key: k(Binding::EnterExit), label: "JUMP OFF ELEPHANT" });
         } else if self.on_foot {
-            a.push(SpecialAction { key: "RMB", label: "WALK FORWARD" });
+            a.push(SpecialAction { key: c.walk_button.display().to_string(), label: "WALK FORWARD" });
             match self.board_target() {
-                Some(BoardTarget::Car) => a.push(SpecialAction { key: "E", label: "ENTER CAR" }),
-                Some(BoardTarget::Plane) => a.push(SpecialAction { key: "E", label: "ENTER AIRPLANE" }),
-                Some(BoardTarget::Elephant(_)) => a.push(SpecialAction { key: "E", label: "BOARD ELEPHANT" }),
+                Some(BoardTarget::Car) => a.push(SpecialAction { key: k(Binding::EnterExit), label: "ENTER CAR" }),
+                Some(BoardTarget::Plane) => a.push(SpecialAction { key: k(Binding::EnterExit), label: "ENTER AIRPLANE" }),
+                Some(BoardTarget::Elephant(_)) => a.push(SpecialAction { key: k(Binding::EnterExit), label: "BOARD ELEPHANT" }),
                 None => {}
             }
         } else {
             a.push(SpecialAction {
-                key: "E",
+                key: k(Binding::EnterExit),
                 label: if self.in_plane { "EXIT AIRPLANE (WHEN SLOW)" } else { "EXIT CAR (WHEN SLOW)" },
             });
             if self.in_plane {
                 a.push(SpecialAction {
-                    key: "M",
+                    key: k(Binding::AutoLand),
                     label: if self.landing { "CANCEL AUTO-LAND" } else { "AUTO-LAND" },
                 });
             }
         }
         // Summon keys — they work from anywhere and never collide with movement.
         if !self.in_plane {
-            a.push(SpecialAction { key: "F", label: "SUMMON AIRPLANE" });
+            a.push(SpecialAction { key: k(Binding::SummonAirplane), label: "SUMMON AIRPLANE" });
         }
         if !self.in_dragon {
-            a.push(SpecialAction { key: "G", label: "SUMMON DRAGON" });
+            a.push(SpecialAction { key: k(Binding::SummonDragon), label: "SUMMON DRAGON" });
         }
         // View & camera.
         a.push(SpecialAction {
-            key: "V",
+            key: k(Binding::View),
             label: if self.view_3d { "TOP-DOWN VIEW" } else { "3D CHASE-CAM" },
         });
         if self.view_3d {
-            a.push(SpecialAction { key: "C", label: "RESET CAMERA" });
+            a.push(SpecialAction { key: k(Binding::ResetCamera), label: "RESET CAMERA" });
         }
         a.push(SpecialAction {
-            key: "F1",
+            key: k(Binding::AutoMode),
             label: if self.auto_mode { "AUTO: ON — TAKE OVER ANYTIME" } else { "AUTO: OFF" },
         });
-        a.push(SpecialAction { key: "P", label: "PAUSE" });
-        a.push(SpecialAction { key: "R", label: "RE-CENTER CAMERA" });
+        a.push(SpecialAction { key: k(Binding::Pause), label: "PAUSE" });
+        a.push(SpecialAction { key: k(Binding::Recenter), label: "RE-CENTER CAMERA" });
         a
     }
 
     /// Commit one fixed 60 Hz tick. Returns events for the audio layer.
     pub fn tick(&mut self, input: &mut Input) -> Vec<Event> {
         let mut events = Vec::new();
+
+        // ---- Config page (ESC): the world freezes while it is open ----
+        if input.just_pressed(&self.config.config_page) {
+            self.config_open = !self.config_open;
+        }
+        if self.config_open {
+            self.update_config_page(input, &mut events);
+            input.end_frame();
+            return events;
+        }
+
         if self.paused {
+            // P (or whatever the pause key is bound to) resumes.
+            if input.just_pressed(&self.config.pause) {
+                self.paused = false;
+            }
+            input.end_frame();
             return events;
         }
         self.time += DT;
@@ -420,18 +525,20 @@ impl GameState {
         self.fx.update(DT);
 
         // ---- View mode & 3D chase-cam (smooth, shortest path) ----
-        if input.just_pressed("v") {
+        if input.just_pressed(&self.config.view) {
             self.view_3d = !self.view_3d;
         }
         // Mouse-drag camera control (3D mode): horizontal drag orbits around
-        // the player, vertical drag tilts the pitch; C resets to chase view.
-        // In the plane (or on the dragon) the drag steers the craft instead.
+        // the player, vertical drag tilts the pitch; reset-camera key snaps
+        // back to chase view. In the plane (or on the dragon) the drag
+        // steers the craft instead.
         let (mdx, mdy) = input.mouse_delta();
+        let msens = self.config.mouse_sensitivity;
         if self.view_3d && !self.in_plane && !self.in_dragon {
-            self.cam3d_orbit += mdx * 0.005;
-            self.cam3d_pitch = (self.cam3d_pitch - mdy * 0.004).clamp(-1.2, 0.6);
+            self.cam3d_orbit += mdx * 0.005 * msens;
+            self.cam3d_pitch = (self.cam3d_pitch - mdy * 0.004 * msens).clamp(-1.2, 0.6);
         }
-        if input.just_pressed("c") {
+        if input.just_pressed(&self.config.reset_camera) {
             self.cam3d_orbit = 0.0;
             self.cam3d_pitch = 0.0;
         }
@@ -448,8 +555,8 @@ impl GameState {
             return events;
         }
 
-        // ---- F: summon the airplane and take the controls, anywhere ----
-        if input.just_pressed("f") && !self.in_plane {
+        // ---- Summon the airplane and take the controls, anywhere ----
+        if input.just_pressed(&self.config.summon_airplane) && !self.in_plane {
             let (px, py, ph, pz) = if self.in_dragon {
                 let d = self.wildlife.dragon;
                 (d.x, d.y, d.heading, d.z)
@@ -482,8 +589,8 @@ impl GameState {
             self.set_msg("PLANE SUMMONED — DRAG: steer · LMB: throttle · WHEEL: speed · M: auto-land", 4.5);
         }
 
-        // ---- G: summon the dragon and take its reins, anywhere ----
-        if input.just_pressed("g") && !self.in_dragon {
+        // ---- Summon the dragon and take its reins, anywhere ----
+        if input.just_pressed(&self.config.summon_dragon) && !self.in_dragon {
             let (px, py, ph, pz) = if self.in_plane {
                 (self.plane.x, self.plane.y, self.plane.heading, self.plane.z)
             } else if self.on_foot {
@@ -517,8 +624,8 @@ impl GameState {
             );
         }
 
-        // ---- M: auto-land at the nearest safe space (toggle) ----
-        if input.just_pressed("m") && self.in_plane {
+        // ---- Auto-land at the nearest safe space (toggle) ----
+        if input.just_pressed(&self.config.auto_land) && self.in_plane {
             if self.landing {
                 self.landing = false;
                 self.set_msg("AUTO-LAND CANCELLED", 2.0);
@@ -534,7 +641,7 @@ impl GameState {
         //      dragon). Each one travels according to its native nature;
         //      grab the controls any time and it obeys you, release and it
         //      hands itself back. ----
-        if input.just_pressed("f1") {
+        if input.just_pressed(&self.config.auto_mode) {
             self.auto_mode = !self.auto_mode;
             if self.auto_mode {
                 self.set_msg(
@@ -552,14 +659,15 @@ impl GameState {
 
         // ---- Player ----
         let (px, py) = if self.in_dragon {
-            let kb = input.car_controls();
+            let kb = input.car_controls(&self.config);
             let kb_active = kb.throttle != 0.0
                 || kb.steer != 0.0
                 || kb.handbrake
                 || kb.boost
                 || kb.pitch != 0.0;
-            // RMB/drag/wheel are flight controls; LMB is only the fireball.
-            let mouse_active = input.mouse_right_state()
+            // Brake button/drag/wheel are flight controls; the fireball
+            // button is only the fireball.
+            let mouse_active = input.button_down(self.config.brake_button)
                 || mdx != 0.0
                 || mdy != 0.0
                 || input.wheel_delta() != 0.0;
@@ -584,8 +692,8 @@ impl GameState {
                     }
                 }
                 let pos = (d.x, d.y);
-                // LMB still breathes fire while it flies itself.
-                if input.mouse_down_state() {
+                // The fireball button still breathes fire while it flies itself.
+                if input.button_down(self.config.fireball_button) {
                     self.breathe_fireball(&mut events);
                 }
                 pos
@@ -597,17 +705,17 @@ impl GameState {
                 self.dragon_auto_ready = false;
                 let mut inp = kb;
                 if inp.throttle == 0.0 {
-                    inp.throttle = if input.mouse_right_state() {
+                    inp.throttle = if input.button_down(self.config.brake_button) {
                         -1.0
                     } else {
                         self.mouse_throttle
                     };
                 }
                 if inp.steer == 0.0 {
-                    inp.steer = (mdx * 0.022).clamp(-1.0, 1.0);
+                    inp.steer = (mdx * 0.022 * msens).clamp(-1.0, 1.0);
                 }
                 if inp.pitch == 0.0 {
-                    self.plane_pitch_stick += -mdy * 0.05;
+                    self.plane_pitch_stick += -mdy * 0.05 * msens;
                     self.plane_pitch_stick =
                         (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
                     inp.pitch = self.plane_pitch_stick;
@@ -627,8 +735,8 @@ impl GameState {
                     }
                 }
                 let pos = (d.x, d.y);
-                // LMB: the dragon breathes fire.
-                if input.mouse_down_state() {
+                // Fireball button: the dragon breathes fire.
+                if input.button_down(self.config.fireball_button) {
                     self.breathe_fireball(&mut events);
                 }
                 pos
@@ -638,7 +746,7 @@ impl GameState {
             // auto mode the player can grab the reins (W/S/A/D) to steer it;
             // otherwise it wanders on its own (native, handled in the
             // wildlife step below).
-            let ci = input.car_controls();
+            let ci = input.car_controls(&self.config);
             let kb_active = ci.throttle != 0.0 || ci.steer != 0.0;
             riding_steered = self.auto_mode && kb_active;
             if riding_steered {
@@ -654,7 +762,7 @@ impl GameState {
             self.update_foot(input);
             (self.foot_x, self.foot_y)
         } else if self.in_plane {
-            let kb = input.car_controls();
+            let kb = input.car_controls(&self.config);
             let kb_active = kb.throttle != 0.0
                 || kb.steer != 0.0
                 || kb.handbrake
@@ -679,21 +787,21 @@ impl GameState {
                     // LMB = full throttle, RMB = brake, drag = yaw + pitch
                     // (drag up = climb), wheel = cruise throttle.
                     if inp.throttle == 0.0 {
-                        inp.throttle = if input.mouse_right_state() {
+                        inp.throttle = if input.button_down(self.config.brake_button) {
                             -1.0
-                        } else if input.mouse_down_state() {
+                        } else if input.button_down(self.config.throttle_button) {
                             1.0
                         } else {
                             self.mouse_throttle
                         };
                     }
                     if inp.steer == 0.0 {
-                        inp.steer = (mdx * 0.015).clamp(-1.0, 1.0);
+                        inp.steer = (mdx * 0.015 * msens).clamp(-1.0, 1.0);
                     }
                     if inp.pitch == 0.0 {
                         // Joystick-style pitch stick: drag up feeds +, the stick
                         // decays toward level when the mouse stops moving.
-                        self.plane_pitch_stick += -mdy * 0.05;
+                        self.plane_pitch_stick += -mdy * 0.05 * msens;
                         self.plane_pitch_stick =
                             (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
                         inp.pitch = self.plane_pitch_stick;
@@ -728,7 +836,7 @@ impl GameState {
         } else {
             // In auto mode the car cruises the streets on its own (like
             // traffic) until the player grabs the controls.
-            let car_auto = self.auto_mode && !input.vehicle_input();
+            let car_auto = self.auto_mode && !input.vehicle_input(&self.config);
             if car_auto {
                 if !self.car_auto_ready {
                     self.init_car_auto();
@@ -737,7 +845,7 @@ impl GameState {
                 self.auto_drive_car();
             } else {
                 self.car_auto_ready = false;
-                let inp = input.car_controls();
+                let inp = input.car_controls(&self.config);
                 step_car(&mut self.car, &inp, DT);
                 if collide_car_with_city(&mut self.car, &self.city) {
                     if self.car.speed() > 150.0 {
@@ -778,16 +886,16 @@ impl GameState {
             (self.car.x, self.car.y)
         };
 
-        if input.just_pressed("p") {
+        if input.just_pressed(&self.config.pause) {
             self.paused = true;
         }
-        if input.just_pressed("r") {
+        if input.just_pressed(&self.config.recenter) {
             self.cam_x = px;
             self.cam_y = py;
         }
 
-        // ---- E: board / exit (car, plane, elephant or dragon) ----
-        if input.just_pressed("e") {
+        // ---- Board / exit (car, plane, elephant or dragon) ----
+        if input.just_pressed(&self.config.enter_exit) {
             if self.in_dragon {
                 // Exit: drop to the street below, and hand the dragon back
                 // to its own meander from the altitude it was left at.
@@ -1005,11 +1113,69 @@ impl GameState {
         events
     }
 
+    /// The in-game config page (ESC): move the selection, rebind keys, cycle
+    /// mouse buttons, adjust the sensitivity, save / load / reset. The world
+    /// stays frozen for the duration (the caller returns early).
+    fn update_config_page(&mut self, input: &mut Input, events: &mut Vec<Event>) {
+        let n = Binding::COUNT;
+        // Navigation is always the arrow keys (the movement keys stay
+        // free to rebind).
+        let nav_up = input.just_pressed("arrowup");
+        let nav_down = input.just_pressed("arrowdown");
+        let nav_left = input.just_pressed("arrowleft");
+        let nav_right = input.just_pressed("arrowright");
+
+        if nav_up {
+            self.config_sel = (self.config_sel + n - 1) % n;
+        }
+        if nav_down {
+            self.config_sel = (self.config_sel + 1) % n;
+        }
+        let b = Binding::from_usize(self.config_sel);
+
+        // ←/→ on the selected row: step the sensitivity slider or cycle the
+        // mouse button.
+        if nav_left {
+            self.config_adjust(b, -1);
+        }
+        if nav_right {
+            self.config_adjust(b, 1);
+        }
+
+        // Page actions (these keys are reserved: they never rebind a row).
+        if input.just_pressed("enter") {
+            events.push(Event::ConfigSave);
+            self.set_msg("SAVED → config.ini (downloaded)", 2.5);
+            return;
+        }
+        if input.just_pressed("l") {
+            events.push(Event::ConfigLoad);
+            return;
+        }
+        if input.just_pressed("x") {
+            self.config = Config::default();
+            self.set_msg("DEFAULTS RESTORED — ENTER: SAVE TO config.ini", 2.5);
+            return;
+        }
+
+        // Press any other key: bind it to the selected key row.
+        for k in input.just_pressed_keys() {
+            let kl = k.to_ascii_lowercase();
+            if kl == self.config.config_page { continue; }
+            if kl == "enter" || kl == "l" || kl == "x" { continue; }
+            if kl == "arrowup" || kl == "arrowdown" || kl == "arrowleft" || kl == "arrowright" {
+                continue;
+            }
+            self.config_bind_key(b, &kl);
+            break;
+        }
+    }
+
     fn update_foot(&mut self, input: &Input) {
-        let (mut dx, mut dy, run) = input.foot_controls();
-        // Right mouse button: walk straight ahead in the facing direction
-        // (keyboard still wins if a movement key is held).
-        if input.mouse_right_state() && dx == 0.0 && dy == 0.0 {
+        let (mut dx, mut dy, run) = input.foot_controls(&self.config);
+        // Walk-forward mouse button: walk straight ahead in the facing
+        // direction (keyboard still wins if a movement key is held).
+        if input.button_down(self.config.walk_button) && dx == 0.0 && dy == 0.0 {
             dx = self.foot_heading.cos();
             dy = self.foot_heading.sin();
         }
@@ -2684,6 +2850,111 @@ mod tests {
             s.tick(&mut inp);
         }
         assert_eq!(s.time, t, "time must not advance while paused");
+    }
+
+    /// A complete key press (down + up) so the next press is a fresh edge.
+    fn press(inp: &mut Input, k: &str) {
+        inp.key_down(k);
+        inp.key_up(k);
+    }
+
+    #[test]
+    fn esc_opens_config_page_and_freezes_the_world() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        for _ in 0..5 {
+            s.tick(&mut inp);
+        }
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        assert!(s.config_open, "ESC opens the config page");
+        let t = s.time;
+        for _ in 0..10 {
+            s.tick(&mut inp);
+        }
+        assert_eq!(s.time, t, "the world freezes while the config page is open");
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        assert!(!s.config_open, "ESC closes it again");
+        // The world keeps running afterwards.
+        let t2 = s.time;
+        s.tick(&mut inp);
+        assert!(s.time > t2);
+    }
+
+    #[test]
+    fn config_page_rebinds_keys() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        for _ in 0..10 {
+            s.tick(&mut inp);
+        }
+        // Open the page, select the VIEW row, press Z: Z becomes the view key.
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        assert!(s.config_open);
+        s.config_sel = crate::config::Binding::View.as_usize();
+        press(&mut inp, "z");
+        s.tick(&mut inp);
+        assert_eq!(s.config.view, "z", "Z is now bound to VIEW");
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        assert!(!s.config_open);
+        press(&mut inp, "z");
+        s.tick(&mut inp);
+        assert!(s.view_3d, "pressing Z now toggles the 3D view");
+    }
+
+    #[test]
+    fn config_page_adjusts_sensitivity_and_cycles_mouse_buttons() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        // Sensitivity row: right arrow raises it.
+        s.config_sel = crate::config::Binding::Sensitivity.as_usize();
+        press(&mut inp, "arrowright");
+        s.tick(&mut inp);
+        assert!((s.config.mouse_sensitivity - 1.25).abs() < 1e-9);
+        // Brake-button row: right arrow cycles RMB -> LMB.
+        s.config_sel = crate::config::Binding::BrakeButton.as_usize();
+        press(&mut inp, "arrowright");
+        s.tick(&mut inp);
+        assert_eq!(s.config.brake_button, crate::config::MouseButton::LMB);
+    }
+
+    #[test]
+    fn config_page_save_emits_event_and_round_trips_to_ini() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        press(&mut inp, "escape");
+        s.tick(&mut inp);
+        press(&mut inp, "enter");
+        let events = s.tick(&mut inp);
+        assert!(
+            events.iter().any(|e| matches!(e, Event::ConfigSave)),
+            "ENTER on the config page saves to config.ini"
+        );
+        let ini = s.config.to_ini();
+        assert!(ini.contains("[movement]") && ini.contains("[mouse]") && ini.contains("[specials]"));
+        assert_eq!(crate::config::Config::from_ini(&ini), s.config);
+    }
+
+    #[test]
+    fn config_rebinding_rules() {
+        let mut s = idle_state();
+        // The config-page key can never be stolen.
+        s.config.set_key(crate::config::Binding::Forward, "escape".into());
+        assert_eq!(s.config.forward, "w", "ESC stays the config key");
+        // Binding a key steals it from any other row.
+        s.config.set_key(crate::config::Binding::Forward, "e".into());
+        assert_eq!(s.config.forward, "e");
+        assert_eq!(s.config.enter_exit, "", "E was taken from ENTER/EXIT");
+        // apply_config_text replaces the whole config.
+        let mut ini = s.config.to_ini();
+        ini.push_str("\n[specials]\npause = q\n");
+        s.apply_config_text(&ini);
+        assert_eq!(s.config.pause, "q");
     }
 
     #[test]

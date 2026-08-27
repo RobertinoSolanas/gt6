@@ -22,7 +22,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const errors = [];
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => {
-    if (m.type() === 'error') errors.push('console: ' + m.text());
+    // The boot-time config.ini probe 404s harmlessly when no config.ini
+    // is checked in next to index.html — ignore bare 404 lines.
+    if (m.type() === 'error' && !/404/.test(m.text())) errors.push('console: ' + m.text());
   });
 
   await page.goto('http://localhost:8090/', { waitUntil: 'networkidle0' });
