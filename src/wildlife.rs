@@ -16,6 +16,8 @@ pub struct Elephant {
     pub ty: f64,
     pub heading: f64,
     pub speed: f64,
+    /// The pace the elephant settles back to (used when a rider lets go).
+    pub base_speed: f64,
     pub scale: f64,
     /// Walk-cycle phase in radians (advances with ground distance).
     pub phase: f64,
@@ -83,6 +85,37 @@ impl Elephant {
         self.phase += step * 0.42;
 
         // Never clip through buildings.
+        if let Some((x, y, _, _)) = city.collide_circle(self.x, self.y, self.radius()) {
+            self.x = x;
+            self.y = y;
+        }
+    }
+
+    /// One step of rider control (auto mode): W/S sets the pace (Shift = a
+    /// full charge), A/D steers, and the elephant walks out of buildings
+    /// like it does on its own. Release the keys and the wander behaviour
+    /// below takes it back over.
+    pub fn step_ridden(
+        &mut self,
+        steer: f64,
+        throttle: f64,
+        boost: bool,
+        dt: f64,
+        city: &City,
+    ) {
+        let want = if throttle > 0.0 {
+            self.base_speed * if boost { 2.2 } else { 1.5 }
+        } else if throttle < 0.0 {
+            0.0
+        } else {
+            self.base_speed
+        };
+        self.speed += (want - self.speed) * (dt * 4.0).min(1.0);
+        self.heading += steer * 1.4 * dt;
+        let step = self.speed * self.gait * dt;
+        self.x += self.heading.cos() * step;
+        self.y += self.heading.sin() * step;
+        self.phase += step * 0.42;
         if let Some((x, y, _, _)) = city.collide_circle(self.x, self.y, self.radius()) {
             self.x = x;
             self.y = y;
@@ -523,13 +556,15 @@ impl Elephant {
     /// Spawn at a specific point (used by `Wildlife::new` to place the herd).
     pub fn spawn_at(rng: &mut Rng, scale: f64, x: f64, y: f64) -> Self {
         let (tx, ty) = road_target(rng);
+        let speed = rng.range(15.0, 24.0) * scale.max(0.85);
         Elephant {
             x,
             y,
             tx,
             ty,
             heading: rng.range(0.0, TAU),
-            speed: rng.range(15.0, 24.0) * scale.max(0.85),
+            speed,
+            base_speed: speed,
             scale,
             phase: rng.range(0.0, TAU),
             gait: 1.0,
@@ -575,7 +610,8 @@ impl Wildlife {
     }
 
     /// One simulation step. `threat_*` is the player (used to startle the
-    /// elephants with a fast car).
+    /// elephants with a fast car). `skip_elephant` is an index whose wander
+    /// step is skipped this tick (the player is steering it directly).
     pub fn update(
         &mut self,
         dt: f64,
@@ -585,8 +621,12 @@ impl Wildlife {
         threat_x: f64,
         threat_y: f64,
         threat_speed: f64,
+        skip_elephant: Option<usize>,
     ) {
-        for e in self.elephants.iter_mut() {
+        for (i, e) in self.elephants.iter_mut().enumerate() {
+            if Some(i) == skip_elephant {
+                continue;
+            }
             e.update(dt, rng, city, threat_x, threat_y, threat_speed);
         }
         // Simple herd separation so the elephants don't stack.
@@ -656,7 +696,7 @@ mod tests {
         let (mut w, city, mut rng) = setup();
         let (x0, y0) = (w.elephants[0].x, w.elephants[0].y);
         for _ in 0..300 {
-            w.update(1.0 / 60.0, &mut rng, 5.0, &city, f64::INFINITY, f64::INFINITY, 0.0);
+            w.update(1.0 / 60.0, &mut rng, 5.0, &city, f64::INFINITY, f64::INFINITY, 0.0, None);
         }
         let e = &w.elephants[0];
         let moved = ((e.x - x0).powi(2) + (e.y - y0).powi(2)).sqrt();
@@ -673,7 +713,7 @@ mod tests {
         // Park a "car" right on top of the first elephant and go fast.
         let (tx, ty) = (w.elephants[0].x, w.elephants[0].y);
         for _ in 0..120 {
-            w.update(1.0 / 60.0, &mut rng, 5.0, &city, tx, ty, 300.0);
+            w.update(1.0 / 60.0, &mut rng, 5.0, &city, tx, ty, 300.0, None);
         }
         assert!(w.elephants[0].gait < 0.05, "gait = {}", w.elephants[0].gait);
     }
@@ -682,7 +722,7 @@ mod tests {
     fn birds_fly_above_the_ground_and_wrap() {
         let (mut w, city, mut rng) = setup();
         for t in 0..600 {
-            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0);
+            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0, None);
         }
         let m = 300.0;
         for b in &w.birds {
@@ -698,7 +738,7 @@ mod tests {
     fn dragon_flies_high_and_stays_in_the_wrap_band() {
         let (mut w, city, mut rng) = setup();
         for t in 0..600 {
-            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0);
+            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0, None);
         }
         let d = &w.dragon;
         let m = 400.0;
@@ -773,7 +813,7 @@ mod tests {
         // With the player piloting, the autonomous meander must not move it.
         w.dragon.controlled = true;
         for t in 0..120 {
-            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0);
+            w.update(1.0 / 60.0, &mut rng, t as f64 / 60.0, &city, 0.0, 0.0, 0.0, None);
         }
         assert_eq!(w.dragon.x, x0, "controlled dragon x must not drift");
         assert_eq!(w.dragon.z, z0, "controlled dragon z must not drift");

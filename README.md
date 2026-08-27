@@ -99,6 +99,14 @@ car, in the plane, on the elephant, on the dragon).
   snaps you into the 3D view).
 - **M** — auto-land (airplane only): autopilot flies to the nearest clear
   intersection; press again to cancel.
+- **F1** — toggle **auto mode** for whatever you're currently in (car,
+  airplane, elephant, dragon). In auto mode the object travels on its own
+  according to its *native nature* — the car cruises the street grid like
+  traffic, the plane holds a lazy level loop at its current altitude, the
+  elephant wanders the streets, and the dragon meanders high above the city.
+  Grab **any** control key (or the mouse, in the plane/dragon) to take over
+  at any moment; release it and the object hands itself back to auto mode.
+  Press **F1** again to leave auto mode entirely (full manual).
 - **V** — toggle top-down / 3D chase-cam view
 - **C** (3D mode) — reset the camera back to the chase position
 - **P** — pause
@@ -149,10 +157,18 @@ On foot:
 
 - **WASD / arrows** — walk
 - **Shift** — run
+- **Right mouse (hold)** — walk forward in the direction you're facing
 - **E** — board the nearest rideable thing in reach: your car, the
   airplane, or an **elephant** (it wanders the streets on its own and
   carries you along on its back; **E** again jumps you off back to the
   pavement as a pedestrian)
+
+**Auto mode (F1)** applies to every rideable object. While it's on, the
+object you're in follows its own nature the moment you stop touching the
+controls, and snaps back to obeying you the instant you press a key — so
+you can cruise the streets hands-free, loiter at altitude in the plane,
+steer an elephant for a block and then let it wander, or ride the dragon
+while it loops the sky. The **SPECIALS** panel shows the current F1 state.
 
 ### 3D mode
 

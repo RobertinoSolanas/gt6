@@ -138,6 +138,23 @@ pub struct GameState {
     pub landing: bool,
     pub landing_target: (f64, f64),
 
+    // Auto mode (F1): every usable object travels according to its native
+    // nature (car cruises the streets, plane holds a lazy level loop,
+    // elephant wanders, dragon meanders high). The player can grab the
+    // controls at any time; releasing them hands the object back to auto.
+    pub auto_mode: bool,
+    /// Car autopilot lane state (initialized from the current heading the
+    /// moment auto mode takes over the car).
+    car_auto_dir: usize,
+    car_auto_road: usize,
+    car_auto_ready: bool,
+    /// Altitude the plane's auto cruise holds (set from the plane's current
+    /// altitude when auto mode takes over).
+    plane_auto_alt: f64,
+    /// The dragon's auto meander resumes from its current altitude (set on
+    /// handover so the bob doesn't jump).
+    dragon_auto_ready: bool,
+
     // View mode (V toggles)
     pub view_3d: bool,
     /// Smoothed chase-cam yaw for 3D mode (lags behind the player heading so
@@ -221,6 +238,12 @@ impl GameState {
             plane_pitch_stick: 0.0,
             landing: false,
             landing_target: (ax, ay),
+            auto_mode: false,
+            car_auto_dir: 1, // East
+            car_auto_road: 0,
+            car_auto_ready: false,
+            plane_auto_alt: 220.0,
+            dragon_auto_ready: false,
             view_3d: false,
             cam3d_yaw: car.heading,
             cam3d_orbit: 0.0,
@@ -342,6 +365,7 @@ impl GameState {
         } else if self.riding.is_some() {
             a.push(SpecialAction { key: "E", label: "JUMP OFF ELEPHANT" });
         } else if self.on_foot {
+            a.push(SpecialAction { key: "RMB", label: "WALK FORWARD" });
             match self.board_target() {
                 Some(BoardTarget::Car) => a.push(SpecialAction { key: "E", label: "ENTER CAR" }),
                 Some(BoardTarget::Plane) => a.push(SpecialAction { key: "E", label: "ENTER AIRPLANE" }),
@@ -375,6 +399,10 @@ impl GameState {
         if self.view_3d {
             a.push(SpecialAction { key: "C", label: "RESET CAMERA" });
         }
+        a.push(SpecialAction {
+            key: "F1",
+            label: if self.auto_mode { "AUTO: ON — TAKE OVER ANYTIME" } else { "AUTO: OFF" },
+        });
         a.push(SpecialAction { key: "P", label: "PAUSE" });
         a.push(SpecialAction { key: "R", label: "RE-CENTER CAMERA" });
         a
@@ -502,82 +530,83 @@ impl GameState {
             }
         }
 
+        // ---- F1: auto mode for every usable object (car, plane, elephant,
+        //      dragon). Each one travels according to its native nature;
+        //      grab the controls any time and it obeys you, release and it
+        //      hands itself back. ----
+        if input.just_pressed("f1") {
+            self.auto_mode = !self.auto_mode;
+            if self.auto_mode {
+                self.set_msg(
+                    "AUTO MODE — IT DRIVES ITSELF. GRAB THE CONTROLS ANYTIME · RELEASE TO LET GO",
+                    4.5,
+                );
+            } else {
+                self.set_msg("MANUAL MODE — YOU'RE IN CONTROL", 2.5);
+            }
+        }
+
+        // Per-tick handoff flags for the auto modes (see each branch).
+        let mut dragon_auto = false;
+        let mut riding_steered = false;
+
         // ---- Player ----
         let (px, py) = if self.in_dragon {
-            // Piloting the dragon. Keyboard + mouse, mirroring the airplane:
-            // RMB = brake, drag = yaw + pitch (up = climb), wheel = cruise
-            // throttle, LMB = breathe fire; W/S/A/D/Shift/Space win.
-            let mut inp = input.car_controls();
-            if inp.throttle == 0.0 {
-                inp.throttle = if input.mouse_right_state() {
-                    -1.0
-                } else {
-                    self.mouse_throttle
-                };
-            }
-            if inp.steer == 0.0 {
-                inp.steer = (mdx * 0.022).clamp(-1.0, 1.0);
-            }
-            if inp.pitch == 0.0 {
-                self.plane_pitch_stick += -mdy * 0.05;
-                self.plane_pitch_stick =
-                    (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
-                inp.pitch = self.plane_pitch_stick;
-            } else {
-                self.plane_pitch_stick = 0.0;
-            }
-            self.mouse_throttle =
-                (self.mouse_throttle + input.wheel_delta() * 0.15).clamp(0.0, 1.0);
-            let d = &mut self.wildlife.dragon;
-            d.step_controlled(&inp, DT);
-            // A thin contrail off the wingtips when fast and high, like the plane.
-            let sp = d.speed;
-            if d.z > 60.0 && sp > 260.0 && self.rng.below(3) == 0 {
-                let (cx, cy) = (d.heading.cos(), d.heading.sin());
-                for sy in [-1.0, 1.0] {
-                    self.fx.smoke(&mut self.rng, d.x - cx * 10.0 - cy * sy * 24.0, d.y - cy * 10.0 + cx * sy * 24.0, d.z + 5.0, -cx * sp * 0.1, -cy * sp * 0.1, 5.0, 1.5, 2.4, 0xf4f7fa, 0.3);
+            let kb = input.car_controls();
+            let kb_active = kb.throttle != 0.0
+                || kb.steer != 0.0
+                || kb.handbrake
+                || kb.boost
+                || kb.pitch != 0.0;
+            // RMB/drag/wheel are flight controls; LMB is only the fireball.
+            let mouse_active = input.mouse_right_state()
+                || mdx != 0.0
+                || mdy != 0.0
+                || input.wheel_delta() != 0.0;
+            dragon_auto = self.auto_mode && !kb_active && !mouse_active;
+            if dragon_auto {
+                // Let go: the dragon resumes its own lazy meander from the
+                // altitude it was left at (the meander runs in the wildlife
+                // step below, since `controlled` is false this tick).
+                let d = &mut self.wildlife.dragon;
+                if !self.dragon_auto_ready {
+                    d.z0 = d.z;
+                    self.dragon_auto_ready = true;
                 }
-            }
-            let pos = (d.x, d.y);
-            // LMB: the dragon breathes fire.
-            if input.mouse_down_state() {
-                self.breathe_fireball(&mut events);
-            }
-            pos
-        } else if let Some(idx) = self.riding {
-            // The elephant carries the player: stay glued to its back.
-            let e = self.wildlife.elephants[idx];
-            self.foot_x = e.x;
-            self.foot_y = e.y;
-            self.foot_heading = e.heading;
-            (e.x, e.y)
-        } else if self.on_foot {
-            self.update_foot(input);
-            (self.foot_x, self.foot_y)
-        } else if self.in_plane {
-            let mut inp = input.car_controls();
-            if self.landing {
-                // Autopilot takes the controls until the plane is set down.
-                self.update_landing(&mut inp);
+                // Ease back to a majestic cruise pace.
+                d.speed += (90.0 - d.speed) * (1.0 - (-1.2 * DT).exp());
+                let d = self.wildlife.dragon;
+                let sp = d.speed;
+                if d.z > 60.0 && sp > 260.0 && self.rng.below(3) == 0 {
+                    let (cx, cy) = (d.heading.cos(), d.heading.sin());
+                    for sy in [-1.0, 1.0] {
+                        self.fx.smoke(&mut self.rng, d.x - cx * 10.0 - cy * sy * 24.0, d.y - cy * 10.0 + cx * sy * 24.0, d.z + 5.0, -cx * sp * 0.1, -cy * sp * 0.1, 5.0, 1.5, 2.4, 0xf4f7fa, 0.3);
+                    }
+                }
+                let pos = (d.x, d.y);
+                // LMB still breathes fire while it flies itself.
+                if input.mouse_down_state() {
+                    self.breathe_fireball(&mut events);
+                }
+                pos
             } else {
-                // Mouse flight controls (keyboard still works and wins if used):
-                // LMB = full throttle, RMB = brake, drag = yaw + pitch
-                // (drag up = climb), wheel = cruise throttle.
+                // Piloting the dragon. Keyboard + mouse, mirroring the
+                // airplane: RMB = brake, drag = yaw + pitch (up = climb),
+                // wheel = cruise throttle, LMB = breathe fire; W/S/A/D/
+                // Shift/Space win.
+                self.dragon_auto_ready = false;
+                let mut inp = kb;
                 if inp.throttle == 0.0 {
                     inp.throttle = if input.mouse_right_state() {
                         -1.0
-                    } else if input.mouse_down_state() {
-                        1.0
                     } else {
                         self.mouse_throttle
                     };
                 }
                 if inp.steer == 0.0 {
-                    inp.steer = (mdx * 0.015).clamp(-1.0, 1.0);
+                    inp.steer = (mdx * 0.022).clamp(-1.0, 1.0);
                 }
                 if inp.pitch == 0.0 {
-                    // Joystick-style pitch stick: drag up feeds +, the stick
-                    // decays toward level when the mouse stops moving.
                     self.plane_pitch_stick += -mdy * 0.05;
                     self.plane_pitch_stick =
                         (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
@@ -587,8 +616,95 @@ impl GameState {
                 }
                 self.mouse_throttle =
                     (self.mouse_throttle + input.wheel_delta() * 0.15).clamp(0.0, 1.0);
+                let d = &mut self.wildlife.dragon;
+                d.step_controlled(&inp, DT);
+                // A thin contrail off the wingtips when fast and high, like the plane.
+                let sp = d.speed;
+                if d.z > 60.0 && sp > 260.0 && self.rng.below(3) == 0 {
+                    let (cx, cy) = (d.heading.cos(), d.heading.sin());
+                    for sy in [-1.0, 1.0] {
+                        self.fx.smoke(&mut self.rng, d.x - cx * 10.0 - cy * sy * 24.0, d.y - cy * 10.0 + cx * sy * 24.0, d.z + 5.0, -cx * sp * 0.1, -cy * sp * 0.1, 5.0, 1.5, 2.4, 0xf4f7fa, 0.3);
+                    }
+                }
+                let pos = (d.x, d.y);
+                // LMB: the dragon breathes fire.
+                if input.mouse_down_state() {
+                    self.breathe_fireball(&mut events);
+                }
+                pos
             }
-            step_plane(&mut self.plane, &inp, DT);
+        } else if let Some(idx) = self.riding {
+            // The elephant carries the player: stay glued to its back. In
+            // auto mode the player can grab the reins (W/S/A/D) to steer it;
+            // otherwise it wanders on its own (native, handled in the
+            // wildlife step below).
+            let ci = input.car_controls();
+            let kb_active = ci.throttle != 0.0 || ci.steer != 0.0;
+            riding_steered = self.auto_mode && kb_active;
+            if riding_steered {
+                let e = &mut self.wildlife.elephants[idx];
+                e.step_ridden(ci.steer, ci.throttle, ci.boost, DT, &self.city);
+            }
+            let e = self.wildlife.elephants[idx];
+            self.foot_x = e.x;
+            self.foot_y = e.y;
+            self.foot_heading = e.heading;
+            (e.x, e.y)
+        } else if self.on_foot {
+            self.update_foot(input);
+            (self.foot_x, self.foot_y)
+        } else if self.in_plane {
+            let kb = input.car_controls();
+            let kb_active = kb.throttle != 0.0
+                || kb.steer != 0.0
+                || kb.handbrake
+                || kb.boost
+                || kb.pitch != 0.0;
+            // In auto mode the plane flies a lazy level loop until the
+            // player grabs the keyboard or mouse; M (auto-land) wins over it.
+            let plane_auto = self.auto_mode && !kb_active && !input.mouse_in_use() && !self.landing;
+            if plane_auto {
+                self.auto_fly_plane();
+            } else {
+                // While piloting, remember the altitude (clamped) so auto
+                // mode resumes near where the player left off.
+                self.plane_auto_alt +=
+                    (self.plane.z.max(150.0) - self.plane_auto_alt) * (DT * 0.8);
+                let mut inp = kb;
+                if self.landing {
+                    // Autopilot takes the controls until the plane is set down.
+                    self.update_landing(&mut inp);
+                } else {
+                    // Mouse flight controls (keyboard still works and wins if used):
+                    // LMB = full throttle, RMB = brake, drag = yaw + pitch
+                    // (drag up = climb), wheel = cruise throttle.
+                    if inp.throttle == 0.0 {
+                        inp.throttle = if input.mouse_right_state() {
+                            -1.0
+                        } else if input.mouse_down_state() {
+                            1.0
+                        } else {
+                            self.mouse_throttle
+                        };
+                    }
+                    if inp.steer == 0.0 {
+                        inp.steer = (mdx * 0.015).clamp(-1.0, 1.0);
+                    }
+                    if inp.pitch == 0.0 {
+                        // Joystick-style pitch stick: drag up feeds +, the stick
+                        // decays toward level when the mouse stops moving.
+                        self.plane_pitch_stick += -mdy * 0.05;
+                        self.plane_pitch_stick =
+                            (self.plane_pitch_stick.clamp(-1.0, 1.0) / (1.0 + 4.0 * DT)).max(-1.0);
+                        inp.pitch = self.plane_pitch_stick;
+                    } else {
+                        self.plane_pitch_stick = 0.0;
+                    }
+                    self.mouse_throttle =
+                        (self.mouse_throttle + input.wheel_delta() * 0.15).clamp(0.0, 1.0);
+                }
+                step_plane(&mut self.plane, &inp, DT);
+            }
             // Contrail off the wingtips at altitude and speed; dust and
             // sparks on a hard touch-down, dust on a fast rollout.
             let p = self.plane;
@@ -610,42 +726,56 @@ impl GameState {
             }
             (p.x, p.y)
         } else {
-            let inp = input.car_controls();
-            step_car(&mut self.car, &inp, DT);
-            if collide_car_with_city(&mut self.car, &self.city) {
-                if self.car.speed() > 150.0 {
-                    // Crash FX: sparks and debris off the front, plus a puff
-                    // of smoke where the car meets the wall.
-                    let (cx, cy) = (
-                        self.car.x + self.car.heading.cos() * 20.0,
-                        self.car.y + self.car.heading.sin() * 20.0,
-                    );
-                    self.fx.sparks(&mut self.rng, cx, cy, 5.0, 14, 220.0, 0xffc94a);
-                    self.fx.debris(&mut self.rng, cx, cy, 6, 0x3a3f45);
-                    for _ in 0..5 {
-                        self.fx.smoke(&mut self.rng, cx, cy, 4.0, 0.0, 0.0, 16.0, 0.9, 6.5, 0x565b62, 0.5);
+            // In auto mode the car cruises the streets on its own (like
+            // traffic) until the player grabs the controls.
+            let car_auto = self.auto_mode && !input.vehicle_input();
+            if car_auto {
+                if !self.car_auto_ready {
+                    self.init_car_auto();
+                    self.car_auto_ready = true;
+                }
+                self.auto_drive_car();
+            } else {
+                self.car_auto_ready = false;
+                let inp = input.car_controls();
+                step_car(&mut self.car, &inp, DT);
+                if collide_car_with_city(&mut self.car, &self.city) {
+                    if self.car.speed() > 150.0 {
+                        // Crash FX: sparks and debris off the front, plus a puff
+                        // of smoke where the car meets the wall.
+                        let (cx, cy) = (
+                            self.car.x + self.car.heading.cos() * 20.0,
+                            self.car.y + self.car.heading.sin() * 20.0,
+                        );
+                        self.fx.sparks(&mut self.rng, cx, cy, 5.0, 14, 220.0, 0xffc94a);
+                        self.fx.debris(&mut self.rng, cx, cy, 6, 0x3a3f45);
+                        for _ in 0..5 {
+                            self.fx.smoke(&mut self.rng, cx, cy, 4.0, 0.0, 0.0, 16.0, 0.9, 6.5, 0x565b62, 0.5);
+                        }
+                        events.push(Event::Crash);
                     }
-                    events.push(Event::Crash);
+                }
+                // Boost: a flash of exhaust glow behind the car.
+                if inp.boost && self.car.speed() > 180.0 && self.rng.below(2) == 0 {
+                    let (cx, cy) = (self.car.heading.cos(), self.car.heading.sin());
+                    self.fx.smoke(&mut self.rng, self.car.x - cx * 25.0, self.car.y - cy * 25.0, 3.0, -cx * 70.0, -cy * 70.0, 40.0, 0.4, 4.0, 0x7fd4ff, 0.6);
                 }
             }
-            // Drift / handbrake tire smoke off the rear wheels.
-            let c = self.car;
-            let sp = c.speed();
-            let slip = c.slip();
-            if sp > 60.0 && slip.abs() > 40.0 {
-                let (cx, cy) = (c.heading.cos(), c.heading.sin());
-                for sy in [-1.0, 1.0] {
-                    let wx = c.x - cx * 16.0 - cy * sy * 8.0;
-                    let wy = c.y - cy * 16.0 + cx * sy * 8.0;
-                    self.fx.smoke(&mut self.rng, wx, wy, 2.0, -cx * 30.0, -cy * 30.0, 14.0, 0.55, 6.0, 0x8b9099, 0.42);
+            // Drift / handbrake tire smoke off the rear wheels (manual only).
+            if !car_auto {
+                let c = self.car;
+                let sp = c.speed();
+                let slip = c.slip();
+                if sp > 60.0 && slip.abs() > 40.0 {
+                    let (cx, cy) = (c.heading.cos(), c.heading.sin());
+                    for sy in [-1.0, 1.0] {
+                        let wx = c.x - cx * 16.0 - cy * sy * 8.0;
+                        let wy = c.y - cy * 16.0 + cx * sy * 8.0;
+                        self.fx.smoke(&mut self.rng, wx, wy, 2.0, -cx * 30.0, -cy * 30.0, 14.0, 0.55, 6.0, 0x8b9099, 0.42);
+                    }
                 }
             }
-            // Boost: a flash of exhaust glow behind the car.
-            if inp.boost && sp > 180.0 && self.rng.below(2) == 0 {
-                let (cx, cy) = (c.heading.cos(), c.heading.sin());
-                self.fx.smoke(&mut self.rng, c.x - cx * 25.0, c.y - cy * 25.0, 3.0, -cx * 70.0, -cy * 70.0, 40.0, 0.4, 4.0, 0x7fd4ff, 0.6);
-            }
-            (c.x, c.y)
+            (self.car.x, self.car.y)
         };
 
         if input.just_pressed("p") {
@@ -787,8 +917,12 @@ impl GameState {
         }
 
         // ---- Wildlife (elephants on the streets, birds overhead, the dragon) ----
-        // Keep the dragon's control flag in sync with the mode each tick.
-        self.wildlife.dragon.controlled = self.in_dragon;
+        // Keep the dragon's control flag in sync with the mode each tick:
+        // it meanders on its own when the player lets go (auto mode).
+        self.wildlife.dragon.controlled = self.in_dragon && !dragon_auto;
+        // Skip the elephant's own wander when the player is steering it this
+        // tick (its movement is applied in the player section instead).
+        let skip_elephant = self.riding.filter(|_| riding_steered);
         self.wildlife.update(
             DT,
             &mut self.rng,
@@ -797,6 +931,7 @@ impl GameState {
             px,
             py,
             threat_speed,
+            skip_elephant,
         );
         if !self.in_dragon {
             self.elephant_collisions(&mut events, px, py, threat_speed);
@@ -871,7 +1006,13 @@ impl GameState {
     }
 
     fn update_foot(&mut self, input: &Input) {
-        let (dx, dy, run) = input.foot_controls();
+        let (mut dx, mut dy, run) = input.foot_controls();
+        // Right mouse button: walk straight ahead in the facing direction
+        // (keyboard still wins if a movement key is held).
+        if input.mouse_right_state() && dx == 0.0 && dy == 0.0 {
+            dx = self.foot_heading.cos();
+            dy = self.foot_heading.sin();
+        }
         if dx != 0.0 || dy != 0.0 {
             let l = (dx * dx + dy * dy).sqrt();
             let spd = if run { RUN_SPEED } else { FOOT_SPEED };
@@ -1137,6 +1278,166 @@ impl GameState {
         } else {
             (want / 1200.0).clamp(0.0, 1.0)
         };
+    }
+
+    /// Pick the lane the car's autopilot should follow: the cardinal
+    /// direction closest to the current heading, on the nearest road.
+    fn init_car_auto(&mut self) {
+        let h = self.car.heading;
+        let dirs = [
+            crate::traffic::Dir::E,
+            crate::traffic::Dir::S,
+            crate::traffic::Dir::W,
+            crate::traffic::Dir::N,
+        ];
+        let mut best = 0;
+        let mut best_diff = f64::MAX;
+        for (i, d) in dirs.iter().enumerate() {
+            let mut diff = (d.angle() - h).rem_euclid(std::f64::consts::TAU);
+            if diff > std::f64::consts::PI {
+                diff -= std::f64::consts::TAU;
+            }
+            if diff.abs() < best_diff {
+                best_diff = diff.abs();
+                best = i;
+            }
+        }
+        self.car_auto_dir = dirs[best].as_usize();
+        let d = crate::traffic::Dir::from_usize(self.car_auto_dir);
+        self.car_auto_road = if d.vertical() {
+            crate::traffic::nearest_road(self.car.x)
+        } else {
+            crate::traffic::nearest_road(self.car.y)
+        };
+    }
+
+    /// One step of the car's autopilot: a steady lane follower on the road
+    /// grid (same kinematics as the traffic, with random turns at
+    /// intersections), so auto mode always drives on the streets.
+    fn auto_drive_car(&mut self) {
+        use crate::traffic::{Dir, nearest_road, road_center};
+        const SPEED: f64 = 210.0;
+        let c = &mut self.car;
+        let dir = Dir::from_usize(self.car_auto_dir);
+        // Ease the nose into the lane's heading.
+        let target = dir.angle();
+        let mut diff = (target - c.heading).rem_euclid(std::f64::consts::TAU);
+        if diff > std::f64::consts::PI {
+            diff -= std::f64::consts::TAU;
+        }
+        let max_turn = 5.0 * DT;
+        c.heading += diff.clamp(-max_turn, max_turn);
+
+        let step = SPEED * DT;
+        let (mut x, mut y) = (c.x, c.y);
+        match dir {
+            Dir::N => y -= step,
+            Dir::E => x += step,
+            Dir::S => y += step,
+            Dir::W => x -= step,
+        }
+
+        let old_along = if dir.vertical() { c.y } else { c.x };
+        let new_along = if dir.vertical() { y } else { x };
+        let crossing = if dir.vertical() {
+            nearest_road(c.y)
+        } else {
+            nearest_road(c.x)
+        };
+        let cross_center = road_center(crossing);
+        let passed = match dir {
+            Dir::N => old_along > cross_center && new_along <= cross_center,
+            Dir::S => old_along < cross_center && new_along >= cross_center,
+            Dir::E => old_along < cross_center && new_along >= cross_center,
+            Dir::W => old_along > cross_center && new_along <= cross_center,
+        };
+
+        if passed {
+            // A random decision at the intersection, like the traffic.
+            let r = self.rng.f();
+            let turn = if r < 0.25 {
+                -1i8
+            } else if r < 0.5 {
+                1
+            } else {
+                0
+            };
+            if turn != 0 {
+                let old_road = self.car_auto_road;
+                let new_dir =
+                    Dir::from_usize((dir.as_usize() + if turn > 0 { 1 } else { 3 }) % 4);
+                self.car_auto_dir = new_dir.as_usize();
+                self.car_auto_road = crossing;
+                let (ix, iy) = if dir.vertical() {
+                    (road_center(old_road), road_center(crossing))
+                } else {
+                    (road_center(crossing), road_center(old_road))
+                };
+                let lane = new_dir.lane_offset();
+                if new_dir.vertical() {
+                    c.x = ix + lane;
+                    c.y = iy;
+                } else {
+                    c.x = ix;
+                    c.y = iy + lane;
+                }
+            } else if dir.vertical() {
+                c.x = road_center(self.car_auto_road) + dir.lane_offset();
+                c.y = y;
+            } else {
+                c.x = x;
+                c.y = road_center(self.car_auto_road) + dir.lane_offset();
+            }
+        } else {
+            c.x = x;
+            c.y = y;
+        }
+
+        c.vx = c.heading.cos() * SPEED;
+        c.vy = c.heading.sin() * SPEED;
+
+        // Ran off the grid (e.g. pushed into the void): resnap to a fresh
+        // lane and keep cruising.
+        if c.x < 10.0 || c.x > crate::city::SIZE - 10.0 || c.y < 10.0 || c.y > crate::city::SIZE - 10.0 {
+            self.car_auto_dir = self.rng.below(4);
+            self.car_auto_road = self.rng.below(crate::city::LANES);
+            let d = Dir::from_usize(self.car_auto_dir);
+            let lane = d.lane_offset();
+            let along = (ROAD_HALF + self.rng.f() * (crate::city::SIZE - crate::city::ROAD)).clamp(10.0, crate::city::SIZE - 10.0);
+            if d.vertical() {
+                c.x = road_center(self.car_auto_road) + lane;
+                c.y = along;
+            } else {
+                c.x = along;
+                c.y = road_center(self.car_auto_road) + lane;
+            }
+            c.heading = d.angle();
+        }
+    }
+
+    /// One step of the plane's autopilot (auto mode): a lazy loiter — hold
+    /// the remembered cruise altitude and trace slow, wide meanders.
+    fn auto_fly_plane(&mut self) {
+        let alt = self.plane_auto_alt;
+        let pitch = if self.plane.z < alt - 12.0 {
+            1.0
+        } else if self.plane.z > alt + 12.0 {
+            -0.6
+        } else {
+            0.0
+        };
+        let t = self.time;
+        let steer = ((t * 0.25 + 1.3).sin() * 0.5 + (t * 0.063 + 2.1).sin() * 0.5)
+            .clamp(-0.6, 0.6);
+        let inp = crate::car::CarInput {
+            throttle: 0.62,
+            steer,
+            pitch,
+            handbrake: false,
+            boost: false,
+        };
+        step_plane(&mut self.plane, &inp, DT);
+        self.plane_pitch_stick = 0.0;
     }
 
     /// Hurl one fireball from the dragon's mouth (LMB while piloting).
@@ -2383,6 +2684,127 @@ mod tests {
             s.tick(&mut inp);
         }
         assert_eq!(s.time, t, "time must not advance while paused");
+    }
+
+    #[test]
+    fn f1_toggles_auto_mode_and_the_car_drives_itself() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        for _ in 0..30 {
+            s.tick(&mut inp);
+        }
+        assert!(!s.auto_mode);
+        // Turn auto mode on. With no keys held the car should now move on
+        // its own (it is parked at the start).
+        inp.key_down("f1");
+        s.tick(&mut inp);
+        assert!(s.auto_mode, "F1 should enable auto mode");
+        inp.key_up("f1");
+        let (sx, sy) = (s.car.x, s.car.y);
+        for _ in 0..180 {
+            s.tick(&mut inp);
+        }
+        let moved = ((s.car.x - sx).powi(2) + (s.car.y - sy).powi(2)).sqrt();
+        assert!(moved > 60.0, "auto car should drive itself, moved {moved}");
+        // It must stay on the street grid, never inside a building.
+        assert!(
+            !s.city.buildings().any(|b| b.contains(s.car.x, s.car.y)),
+            "auto car drove into a building"
+        );
+        // F1 again returns to manual (a fresh idle car no longer moves).
+        inp.key_down("f1");
+        s.tick(&mut inp);
+        assert!(!s.auto_mode);
+        inp.key_up("f1");
+    }
+
+    #[test]
+    fn auto_mode_grab_and_release_the_controls() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        for _ in 0..30 {
+            s.tick(&mut inp);
+        }
+        // On the dragon with auto mode: it meanders (not player-controlled).
+        keypress(&mut inp, "g");
+        s.tick(&mut inp);
+        inp.key_down("f1");
+        s.tick(&mut inp);
+        inp.key_up("f1");
+        s.tick(&mut inp);
+        assert!(s.in_dragon);
+        assert!(
+            !s.wildlife.dragon.controlled,
+            "idle in auto mode: the dragon flies itself"
+        );
+        // Grab the controls: it becomes player-controlled.
+        keypress(&mut inp, "w");
+        s.tick(&mut inp);
+        assert!(
+            s.wildlife.dragon.controlled,
+            "pressing a control key takes over the dragon"
+        );
+        // Release: it hands itself back.
+        inp.key_up("w");
+        s.tick(&mut inp);
+        assert!(
+            !s.wildlife.dragon.controlled,
+            "releasing returns the dragon to auto mode"
+        );
+    }
+
+    #[test]
+    fn auto_plane_holds_a_level_cruise() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        // Board the plane and bring it up to altitude in manual.
+        s.in_plane = true;
+        s.on_foot = false;
+        s.plane.z = 300.0;
+        for _ in 0..60 {
+            s.tick(&mut inp);
+        }
+        inp.key_down("f1");
+        s.tick(&mut inp);
+        inp.key_up("f1");
+        assert!(s.auto_mode);
+        for _ in 0..240 {
+            s.tick(&mut inp);
+        }
+        // It is still airborne, cruising near its remembered altitude, and
+        // making real forward progress.
+        assert!(s.plane.z > 100.0, "auto plane should stay aloft, z={}", s.plane.z);
+        assert!(
+            s.plane.z < 450.0,
+            "auto plane should hold a cruise altitude, z={}",
+            s.plane.z
+        );
+        assert!(s.plane.speed() > 100.0, "auto plane should be moving");
+    }
+
+    #[test]
+    fn right_mouse_walks_forward_on_foot() {
+        let mut s = idle_state();
+        let mut inp = Input::new();
+        for _ in 0..30 {
+            s.tick(&mut inp);
+        }
+        keypress(&mut inp, "e"); // get out of the car
+        s.tick(&mut inp);
+        assert!(s.on_foot);
+        let heading = s.foot_heading;
+        let (sx, sy) = (s.foot_x, s.foot_y);
+        inp.mouse_right_down();
+        for _ in 0..60 {
+            s.tick(&mut inp);
+        }
+        inp.mouse_right_up();
+        let (dx, dy) = (s.foot_x - sx, s.foot_y - sy);
+        let moved = (dx * dx + dy * dy).sqrt();
+        assert!(moved > 10.0, "right mouse should walk the player, moved {moved}");
+        // And roughly in the facing direction.
+        let dot = dx * heading.cos() + dy * heading.sin();
+        assert!(dot > moved * 0.5, "should walk forward (dot {dot} of {moved})");
     }
 }
 

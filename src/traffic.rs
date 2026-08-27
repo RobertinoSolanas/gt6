@@ -45,7 +45,7 @@ impl Dir {
         }
     }
     /// Right-hand lane offset, perpendicular to the direction of travel.
-    fn lane_offset(self) -> f64 {
+    pub fn lane_offset(self) -> f64 {
         match self {
             Dir::N => 20.0,
             Dir::E => 20.0,
@@ -74,12 +74,12 @@ const TRAFFIC_COLORS: [u32; 7] = [
 ];
 
 /// Road-center coordinate for index `i`.
-fn road_center(i: usize) -> f64 {
+pub fn road_center(i: usize) -> f64 {
     i as f64 * CELL + ROAD / 2.0
 }
 
 /// Index of the road whose centerline is closest to coordinate `c`.
-fn nearest_road(c: f64) -> usize {
+pub fn nearest_road(c: f64) -> usize {
     (((c - ROAD / 2.0) / CELL).round() as isize).clamp(0, LANES as isize - 1) as usize
 }
 

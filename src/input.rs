@@ -29,10 +29,10 @@ impl Input {
     /// Keys we care about (normalized to lowercase). The special-action keys
     /// (E enter/exit, F plane, G dragon, M auto-land) never overlap the
     /// movement keys (WASD/arrows/Shift/Space).
-    pub const KEYS: [&str; 18] = [
+    pub const KEYS: [&str; 19] = [
         "w", "a", "s", "d",
         "arrowup", "arrowdown", "arrowleft", "arrowright",
-        " ", "shift", "e", "r", "p", "v", "c", "f", "m", "g",
+        " ", "shift", "e", "r", "p", "v", "c", "f", "m", "g", "f1",
     ];
 
     pub fn key_down(&mut self, key: &str) {
@@ -161,6 +161,31 @@ impl Input {
             dy += 1.0;
         }
         (dx, dy, self.is_down("shift"))
+    }
+
+    /// True if any movement key (WASD / arrows / Shift / Space) is held —
+    /// i.e. the player is actively driving the vehicle they are in.
+    pub fn vehicle_input(&self) -> bool {
+        self.is_down("w")
+            || self.is_down("a")
+            || self.is_down("s")
+            || self.is_down("d")
+            || self.is_down("arrowup")
+            || self.is_down("arrowdown")
+            || self.is_down("arrowleft")
+            || self.is_down("arrowright")
+            || self.is_down("shift")
+            || self.is_down(" ")
+    }
+
+    /// True if the mouse is being used in any way (a button held, a drag in
+    /// flight this frame, or the wheel turned).
+    pub fn mouse_in_use(&self) -> bool {
+        self.mouse.down
+            || self.mouse.right
+            || self.mouse.dx != 0.0
+            || self.mouse.dy != 0.0
+            || self.mouse.wheel != 0.0
     }
 }
 
